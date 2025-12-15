@@ -1,7 +1,6 @@
 streamlit
-from streamlit_chess import st_chess
+streamlit-chess
 python-chess
 matplotlib
 pandas
-
 plotly
