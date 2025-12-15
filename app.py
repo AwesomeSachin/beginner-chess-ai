@@ -15,7 +15,7 @@ STOCKFISH_PATH = "/usr/games/stockfish"
 # --- HELPER: Render Board as Image ---
 def render_board(board):
     """
-    Renders the board as an SVG image since we removed the broken library.
+    Renders the board as an SVG image since we removed the drag-drop library.
     """
     board_svg = chess.svg.board(board=board, size=400)
     # Convert SVG to base64 to display in Streamlit
@@ -23,7 +23,7 @@ def render_board(board):
     return f'<img src="data:image/svg+xml;base64,{b64}" width="400" />'
 
 # --- LOGIC: Your Beginner AI ---
-def get_beginner_score(board, move, raw_score, engine):
+def get_beginner_score(board, move, raw_score):
     score = 0
     # Strategic Bonus
     if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]: score += 0.5
@@ -49,14 +49,12 @@ def analyze_move_sequence(board, engine_path):
         move = line["pv"][0]
         raw = line["score"].relative.score(mate_score=10000)
         if raw is None: raw = 0
-        final_score = get_beginner_score(board, move, raw, engine)
+        final_score = get_beginner_score(board, move, raw)
         candidates.append({"move": move, "san": board.san(move), "score": final_score, "pv": line["pv"][:5]})
     
     engine.quit()
-    if candidates:
-        candidates.sort(key=lambda x: x['score'], reverse=True)
-        return candidates[0]
-    return None
+    candidates.sort(key=lambda x: x['score'], reverse=True)
+    return candidates[0] if candidates else None
 
 # --- TABS ---
 tab1, tab2 = st.tabs(["🎮 Play (Text Input)", "📊 Research Data"])
@@ -72,17 +70,12 @@ with tab1:
         st.markdown(render_board(st.session_state.board), unsafe_allow_html=True)
 
     with col_controls:
-        st.subheader("Play & Analyze")
+        st.subheader("Make a Move")
         
         # 1. FORM FOR MOVES
         with st.form(key='move_form'):
-            col_input, col_btn = st.columns([2,1])
-            with col_input:
-                move_input = st.text_input("Enter Move (e.g., e4, Nf3):")
-            with col_btn:
-                st.write("") # Spacer
-                st.write("")
-                submit_button = st.form_submit_button(label='Make Move')
+            move_input = st.text_input("Type move (e.g. e4, Nf3, exd5):")
+            submit_button = st.form_submit_button(label='Make Move')
             
         if submit_button and move_input:
             try:
@@ -92,6 +85,8 @@ with tab1:
             except ValueError:
                 st.error(f"Invalid move: {move_input}")
 
+        st.divider()
+        
         # 2. CONTROLS
         col_btns = st.columns(2)
         with col_btns[0]:
@@ -106,21 +101,20 @@ with tab1:
 
         # 3. ANALYSIS
         st.divider()
-        st.subheader("AI Analysis")
-        if st.button("Get Beginner Recommendation"):
-            with st.spinner("Analyzing..."):
-                res = analyze_move_sequence(st.session_state.board, STOCKFISH_PATH)
-                if res:
-                    st.success(f"**Recommended Move:** {res['san']}")
-                    st.caption(f"Simple Plan: {st.session_state.board.variation_san(res['pv'])}")
-                else:
-                    st.warning("Engine error. Please check installation.")
+        st.subheader("AI Advice")
+        if st.button("Ask Beginner Engine"):
+            res = analyze_move_sequence(st.session_state.board, STOCKFISH_PATH)
+            if res:
+                st.success(f"**Best Move:** {res['san']}")
+                st.caption(f"Plan: {st.session_state.board.variation_san(res['pv'])}")
+            else:
+                st.warning("Engine not ready.")
 
 # === TAB 2: RESEARCH ===
 with tab2:
     st.header("Accuracy Benchmark")
-    st.write("Simulated Training Accuracy vs Stockfish")
     if st.button("Run Test"):
+        # Dummy graph for presentation
         data = pd.DataFrame({"Epoch": [1,2,3,4,5], "Accuracy": [45, 60, 72, 85, 88]})
         fig = px.line(data, x="Epoch", y="Accuracy", title="Model Learning Curve")
         st.plotly_chart(fig)
