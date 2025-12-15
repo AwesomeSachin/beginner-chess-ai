@@ -20,7 +20,7 @@ def render_board(board, arrows=[]):
     """
     board_svg = chess.svg.board(
         board=board, 
-        size=400,
+        size=450,
         arrows=arrows,
         lastmove=board.peek() if board.move_stack else None,
         colors={'square light': '#f0d9b5', 'square dark': '#b58863'}
@@ -85,7 +85,7 @@ def analyze_position(board, engine_path):
 tab1, tab2 = st.tabs(["♟️ Interactive Board & Training", "📊 Game Review (Chess.com Import)"])
 
 # ==========================================
-# TAB 1: INTERACTIVE PLAY (Option B Enhanced)
+# TAB 1: INTERACTIVE PLAY
 # ==========================================
 with tab1:
     col_main, col_sidebar = st.columns([1.5, 1])
@@ -99,25 +99,23 @@ with tab1:
         
         # Controls
         c1, c2, c3 = st.columns(3)
-        if c1.button("⬅️ Undo"):
+        if c1.button("⬅️ Undo Move"):
             if st.session_state.board.move_stack:
                 st.session_state.board.pop()
                 st.session_state.arrows = []
                 st.rerun()
-        if c2.button("🔄 Reset"):
+        if c2.button("🔄 Reset Board"):
             st.session_state.board.reset()
             st.session_state.arrows = []
             st.rerun()
         if c3.button("🧠 Show Plan (Arrows)"):
-            with st.spinner("Thinking..."):
+            with st.spinner("Calculating Plan..."):
                 candidates = analyze_position(st.session_state.board, STOCKFISH_PATH)
                 if candidates:
                     top_move = candidates[0]
-                    # Convert PV moves to Arrows
-                    pv_arrows = []
-                    # Simple logic: Arrow for the best move
-                    pv_arrows.append(chess.svg.Arrow(top_move['move'].from_square, top_move['move'].to_square, color="green"))
-                    # Arrow for the response (if available)
+                    # Arrow for the best move (Green)
+                    pv_arrows = [chess.svg.Arrow(top_move['move'].from_square, top_move['move'].to_square, color="green")]
+                    # Arrow for the response (Blue) if available
                     if len(top_move['pv']) > 1:
                         m2 = top_move['pv'][1]
                         pv_arrows.append(chess.svg.Arrow(m2.from_square, m2.to_square, color="blue"))
@@ -155,83 +153,77 @@ with tab2:
     if st.button("Run Full Analysis"):
         if pgn_input:
             with st.spinner("Running deep analysis... This may take a minute."):
+                # Use StringIO to read the string as a file
                 pgn_io = io.StringIO(pgn_input)
-                game = chess.pgn.read_game(pgn_io)
+                try:
+                    game = chess.pgn.read_game(pgn_io)
+                except:
+                    game = None
                 
-                analysis_data = []
-                board = game.board()
-                engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
-                
-                # Iterate through moves
-                moves = list(game.mainline_moves())
-                for i, move in enumerate(moves):
-                    # 1. Analyze BEFORE the move (What was best?)
-                    info = engine.analyse(board, chess.engine.Limit(time=0.1))
-                    best_eval = info["score"].relative.score(mate_score=10000) / 100
-                    best_move = info["pv"][0]
+                if game is None:
+                    st.error("Invalid PGN format.")
+                else:
+                    analysis_data = []
+                    board = game.board()
+                    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
                     
-                    # 2. Make the move
-                    board.push(move)
+                    moves = list(game.mainline_moves())
                     
-                    # 3. Analyze AFTER (Did we lose advantage?)
-                    info_after = engine.analyse(board, chess.engine.Limit(time=0.1))
-                    curr_eval = info_after["score"].relative.score(mate_score=10000) / 100
-                    
-                    # Calculate Loss
-                    diff = abs(best_eval - (-curr_eval)) # Negate because perspective changes
-                    # Simple heuristic for PGN eval perspective adjustment:
-                    # Actually simpler: Compare engine's eval of played move vs best move
-                    
-                    # Re-eval the played move specifically
-                    board.pop()
-                    info_played = engine.analyse(board, chess.engine.Limit(time=0.1), root_moves=[move])
-                    played_eval = info_played["score"].relative.score(mate_score=10000) / 100
-                    board.push(move)
+                    for i, move in enumerate(moves):
+                        # 1. ANALYZE BEFORE MOVE
+                        info = engine.analyse(board, chess.engine.Limit(time=0.1))
+                        best_eval = info["score"].relative.score(mate_score=10000) / 100
+                        best_move_obj = info["pv"][0]
+                        
+                        # CAPTURE STRINGS NOW (Fixes the crash)
+                        stockfish_best_san = board.san(best_move_obj)
+                        played_move_san = board.san(move)
+                        
+                        # Get Beginner Engine's Opinion
+                        my_recs = analyze_position(board, STOCKFISH_PATH)
+                        my_choice = my_recs[0]['san'] if my_recs else "?"
+                        
+                        # 2. MAKE MOVE
+                        board.push(move)
+                        
+                        # 3. ANALYZE AFTER MOVE
+                        info_after = engine.analyse(board, chess.engine.Limit(time=0.1))
+                        curr_eval = info_after["score"].relative.score(mate_score=10000) / 100
+                        
+                        # Calculate Loss
+                        diff = best_eval - (-curr_eval)
+                        loss = max(0, diff)
+                        
+                        label, color = classify_move(loss)
 
-                    loss = best_eval - played_eval
-                    label, color = classify_move(max(0, loss))
+                        analysis_data.append({
+                            "Move Number": i+1,
+                            "Played": played_move_san,
+                            "Loss (CP)": round(loss, 2),
+                            "Classification": label,
+                            "Stockfish Best": stockfish_best_san,
+                            "My Engine Best": my_choice
+                        })
                     
-                    # 4. Get Beginner Engine Opinion
-                    # We pass the board state (before move) to our custom logic
-                    board.pop()
-                    my_recs = analyze_position(board, STOCKFISH_PATH)
-                    my_choice = my_recs[0]['san'] if my_recs else "?"
-                    board.push(move)
+                    engine.quit()
+                    
+                    # --- RESULTS ---
+                    if analysis_data:
+                        df = pd.DataFrame(analysis_data)
+                        
+                        # 1. Accuracy Graph
+                        st.subheader("1. Move Quality Distribution")
+                        class_counts = df['Classification'].value_counts()
+                        fig1 = px.pie(values=class_counts.values, names=class_counts.index, 
+                                      title="Your Move Quality", color_discrete_sequence=px.colors.sequential.RdBu)
+                        st.plotly_chart(fig1, use_container_width=True)
 
-                    analysis_data.append({
-                        "Move": i+1,
-                        "San": game.mainline_moves(), # Simplified for chart
-                        "Loss (CP)": max(0, loss),
-                        "Classification": label,
-                        "Stockfish Best": board.san(best_move),
-                        "My Engine Best": my_choice
-                    })
-                
-                engine.quit()
-                
-                # --- RESULTS ---
-                df = pd.DataFrame(analysis_data)
-                
-                # 1. Accuracy Graph (Bar Chart of Classification)
-                st.subheader("1. Move Quality Distribution")
-                class_counts = df['Classification'].value_counts()
-                fig1 = px.pie(values=class_counts.values, names=class_counts.index, 
-                              title="Your Move Quality", color_discrete_sequence=px.colors.sequential.RdBu)
-                st.plotly_chart(fig1, use_container_width=True)
+                        # 2. Engine Comparison
+                        st.subheader("2. Advantage Loss Per Move")
+                        fig2 = px.line(df, x="Move Number", y="Loss (CP)", title="Lower is Better (Spikes = Blunders)")
+                        st.plotly_chart(fig2, use_container_width=True)
 
-                # 2. Engine Comparison (Line Chart)
-                st.subheader("2. Stockfish vs Beginner Engine Agreement")
-                # Create a metric: How often did 'My Engine Best' match 'Stockfish Best'?
-                st.info("This graph compares how often the 'Beginner Engine' agrees with the 'Grandmaster Engine'.")
-                
-                # Dummy simulation data for visual richness (since we calculated single points above)
-                # In a real app, you'd track the evaluations of both engines over time
-                x_vals = list(range(len(df)))
-                fig2 = go.Figure()
-                fig2.add_trace(go.Scatter(x=x_vals, y=df['Loss (CP)'], mode='lines+markers', name='Your Error (CP Loss)'))
-                st.plotly_chart(fig2, use_container_width=True)
-
-                # 3. Detailed Table
-                st.subheader("3. Move-by-Move Feedback")
-                st.dataframe(df[["Move", "Classification", "Stockfish Best", "My Engine Best"]])
+                        # 3. Detailed Table
+                        st.subheader("3. Move-by-Move Feedback")
+                        st.dataframe(df[["Move Number", "Played", "Classification", "Stockfish Best", "My Engine Best"]])
 
