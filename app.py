@@ -21,19 +21,16 @@ if 'feedback_data' not in st.session_state: st.session_state.feedback_data = Non
 def render_board(board, arrows=[]):
     board_svg = chess.svg.board(
         board=board, 
-        size=600, # Large board
+        size=550, # Optimized size to prevent scrolling
         arrows=arrows,
         lastmove=board.peek() if board.move_stack else None,
         colors={'square light': '#f0d9b5', 'square dark': '#b58863'}
     )
     b64 = base64.b64encode(board_svg.encode('utf-8')).decode("utf-8")
-    return f'<img src="data:image/svg+xml;base64,{b64}" width="100%" />'
+    return f'<img src="data:image/svg+xml;base64,{b64}" width="100%" style="display:block; margin-bottom:10px;" />'
 
 # --- LOGIC: EXPLANATION ---
 def explain_move(board_before, move):
-    """
-    Compares state BEFORE and AFTER the move to find the LOGICAL reason.
-    """
     narrative = []
     board_after = board_before.copy()
     board_after.push(move)
@@ -42,14 +39,14 @@ def explain_move(board_before, move):
     if board_before.is_capture(move):
         victim = board_before.piece_at(move.to_square)
         if victim:
-            narrative.append(f"Captures the {chess.piece_name(victim.piece_type).capitalize()} (Material Gain).")
+            narrative.append(f"Captures {chess.piece_name(victim.piece_type)}.")
         else:
             narrative.append("Recaptures material.")
 
     # 2. DEFENSE
     was_attacked = board_before.is_attacked_by(not board_before.turn, move.from_square)
     if was_attacked:
-        narrative.append("Escapes a threat! The piece was under attack.")
+        narrative.append("Escapes a threat.")
 
     # 3. THREATS
     new_threats = []
@@ -60,30 +57,30 @@ def explain_move(board_before, move):
             elif target.piece_type == chess.ROOK: new_threats.append("Rook")
     
     if new_threats:
-        narrative.append(f"Creates a direct threat on the {new_threats[0]}!")
+        narrative.append(f"Attacks the {new_threats[0]}!")
 
-    # 4. OPENING
-    if board_before.fullmove_number < 10:
+    # 4. OPENING / STRATEGY
+    if board_before.fullmove_number < 12:
         if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
-            narrative.append("Fights for central control.")
+            narrative.append("Controls the center.")
         elif board_before.is_castling(move):
-            narrative.append("Castles for King Safety.")
+            narrative.append("Castles for safety.")
         elif board_before.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
-            narrative.append("Develops piece to active square.")
+            narrative.append("Develops piece.")
 
     # 5. CHECK
-    if board_after.is_checkmate(): return "CHECKMATE! The game is won."
+    if board_after.is_checkmate(): return "CHECKMATE!"
     if board_after.is_check(): narrative.append("Delivers Check.")
 
-    # 6. PAWN PUSH
+    # 6. PAWN
     if not narrative and board_before.piece_type_at(move.from_square) == chess.PAWN:
         rank = chess.square_rank(move.to_square)
         if (board_before.turn == chess.WHITE and rank >= 5) or (board_before.turn == chess.BLACK and rank <= 2):
-            narrative.append("Pushing the pawn closer to promotion!")
+            narrative.append("Pushes passed pawn.")
         else:
-            narrative.append("Improves pawn structure.")
+            narrative.append("Improves structure.")
 
-    if not narrative: return "A solid positional improvement."
+    if not narrative: return "Positional improvement."
     return " ".join(narrative)
 
 # --- LOGIC: ANALYSIS ---
@@ -93,7 +90,6 @@ def get_analysis(board, engine_path):
     except:
         return None, []
     
-    # Analyze Top 9 moves (Deeper list)
     info = engine.analyse(board, chess.engine.Limit(time=0.4), multipv=9)
     candidates = []
     
@@ -130,7 +126,7 @@ st.title("♟️ Deep Logic Chess Analyst")
 # SIDEBAR
 with st.sidebar:
     st.header("Load Game")
-    pgn_txt = st.text_area("Paste PGN:", height=150)
+    pgn_txt = st.text_area("Paste PGN:", height=100)
     if st.button("Load & Reset"):
         if pgn_txt:
             try:
@@ -150,11 +146,11 @@ with st.sidebar:
         st.session_state.feedback_data = None
         st.rerun()
 
-# LAYOUT
+# LAYOUT CONFIG
 col_main, col_info = st.columns([1.5, 1.2])
 
 # AUTO-ANALYSIS
-with st.spinner("Analyzing..."):
+with st.spinner("Processing..."):
     best_plan, candidates = get_analysis(st.session_state.board, STOCKFISH_PATH)
 
 arrows = []
@@ -164,24 +160,44 @@ if best_plan:
 
 # === LEFT: BOARD ===
 with col_main:
+    # 1. THE BOARD IMAGE
     st.markdown(render_board(st.session_state.board, arrows), unsafe_allow_html=True)
     
-    # NAVIGATION & SYNC
+    # 2. NAVIGATION BUTTONS (Immediately below board)
     if st.session_state.game_moves:
-        c1, c2, c3 = st.columns([1,2,1])
+        c1, c2, c3 = st.columns([0.8, 2, 0.8])
         
-        # SMART SYNC CHECK:
-        # Check if current board matches the game at the current index
+        # Sync Logic
         game_board_at_index = chess.Board()
         for i in range(st.session_state.move_index):
             game_board_at_index.push(st.session_state.game_moves[i])
-            
         on_track = (game_board_at_index.fen() == st.session_state.board.fen())
+
+        with c1:
+             if st.button("◀ Undo", use_container_width=True):
+                if st.session_state.board.move_stack:
+                    st.session_state.board.pop()
+                    if on_track and st.session_state.move_index > 0: 
+                        st.session_state.move_index -= 1
+                    
+                    # Auto-fix index if we undo back into the line
+                    undo_fen = st.session_state.board.fen()
+                    temp = chess.Board()
+                    if temp.fen() == undo_fen:
+                        st.session_state.move_index = 0
+                    else:
+                        for i, m in enumerate(st.session_state.game_moves):
+                            temp.push(m)
+                            if temp.fen() == undo_fen:
+                                st.session_state.move_index = i + 1
+                                break
+                    st.session_state.feedback_data = None
+                    st.rerun()
 
         with c3:
             if on_track:
-                # NEXT BUTTON
-                if st.button("Next Move ▶", use_container_width=True) and st.session_state.move_index < len(st.session_state.game_moves):
+                if st.button("Next ▶", use_container_width=True) and st.session_state.move_index < len(st.session_state.game_moves):
+                    # Capture State
                     board_before = st.session_state.board.copy()
                     expected_eval = best_plan['eval'] if best_plan else 0
                     
@@ -195,54 +211,21 @@ with col_main:
                     st.session_state.feedback_data = judge_move(curr_eval, expected_eval, board_before, move)
                     st.rerun()
             else:
-                # RESUME BUTTON
-                if st.button("⏩ Resume Game Line", use_container_width=True):
-                    # Force jump to correct state
+                if st.button("Sync ⏩", use_container_width=True):
+                    # Resume
                     st.session_state.board = game_board_at_index
-                    # Play the pending move
                     if st.session_state.move_index < len(st.session_state.game_moves):
                         move = st.session_state.game_moves[st.session_state.move_index]
-                        
-                        # Recalculate expectation
                         resume_best, _ = get_analysis(game_board_at_index, STOCKFISH_PATH)
                         exp_eval = resume_best['eval'] if resume_best else 0
-                        
                         st.session_state.board.push(move)
                         st.session_state.move_index += 1
-                        
                         new_best, _ = get_analysis(st.session_state.board, STOCKFISH_PATH)
                         curr_eval = new_best['eval'] if new_best else 0
                         st.session_state.feedback_data = judge_move(curr_eval, exp_eval, game_board_at_index, move)
                     st.rerun()
-
-        with c1:
-            if st.button("◀ Undo"):
-                if st.session_state.board.move_stack:
-                    st.session_state.board.pop()
-                    
-                    # AUTO-DETECT INDEX: 
-                    # If we undid back into the game line, fix the index automatically
-                    undo_board_fen = st.session_state.board.fen()
-                    found_index = -1
-                    
-                    # Scan the game moves to see if we match a previous state
-                    test_board = chess.Board()
-                    if test_board.fen() == undo_board_fen:
-                        found_index = 0
-                    else:
-                        for i, m in enumerate(st.session_state.game_moves):
-                            test_board.push(m)
-                            if test_board.fen() == undo_board_fen:
-                                found_index = i + 1
-                                break
-                    
-                    if found_index != -1:
-                        st.session_state.move_index = found_index
-                    
-                    st.session_state.feedback_data = None
-                    st.rerun()
     else:
-        if st.button("◀ Undo Last Move"):
+        if st.button("◀ Undo Last", use_container_width=True):
             if st.session_state.board.move_stack:
                 st.session_state.board.pop()
                 st.session_state.feedback_data = None
@@ -251,40 +234,42 @@ with col_main:
 # === RIGHT: INFO PANEL ===
 with col_info:
     
-    # 1. FEEDBACK BANNER (Now at Top Right)
+    # 1. COMPACT FEEDBACK BANNER
     if st.session_state.feedback_data:
         data = st.session_state.feedback_data
         st.markdown(f"""
-        <div style="background-color: {data['color']}; color: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-            <h2 style="margin:0; text-align: center;">{data['label']}</h2>
-            <hr style="margin: 8px 0; border-color: rgba(255,255,255,0.3);">
-            <p style="margin:0; text-align: center; font-size: 16px;"><b>Reason:</b> {data['text']}</p>
+        <div style="background-color: {data['color']}; color: white; padding: 10px; border-radius: 6px; margin-bottom: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h4 style="margin:0; text-align: center;">{data['label']}</h4>
+            <p style="margin:0; text-align: center; font-size: 14px; margin-top:4px;">{data['text']}</p>
         </div>
         """, unsafe_allow_html=True)
     else:
-        # Placeholder
-        st.info("Make a move to see evaluation.")
+        st.markdown("""
+        <div style="background-color: #f0f2f6; color: #333; padding: 10px; border-radius: 6px; margin-bottom: 10px; text-align: center;">
+            <p style="margin:0; font-size: 14px;">Make a move to see feedback.</p>
+        </div>
+        """, unsafe_allow_html=True)
 
     # 2. ENGINE SUGGESTION
     st.subheader("💡 Engine Suggestion")
     if best_plan:
         c_eval, c_move = st.columns([1, 2])
         c_eval.metric("Eval", f"{best_plan['eval']:+.2f}")
-        c_move.info(f"**Best:** {best_plan['san']}")
+        c_move.success(f"**Best:** {best_plan['san']}")
         
-        st.write(f"**Why:** {best_plan['explanation']}")
+        st.markdown(f"**Reason:** {best_plan['explanation']}")
         st.caption(f"Line: {st.session_state.board.variation_san(best_plan['pv'])}")
     
     st.divider()
 
-    # 3. PLAYABLE MOVES (Expanded Grid)
-    st.subheader("Play Alternative Moves")
+    # 3. PLAYABLE MOVES
+    st.subheader("Explore Alternative Moves")
     if candidates:
-        # Row 1 (Top 3)
+        # Row 1
         cols1 = st.columns(3)
         for i, cand in enumerate(candidates[:3]):
             with cols1[i]:
-                if st.button(f"#{i+1} {cand['san']}", key=f"top_{i}", use_container_width=True):
+                if st.button(f"{cand['san']}", key=f"top_{i}", use_container_width=True):
                     st.session_state.board.push(cand['move'])
                     st.session_state.feedback_data = {
                         "label": "✅ Best Move" if i==0 else "🆗 Good Alt",
@@ -292,26 +277,26 @@ with col_info:
                         "text": cand['explanation']
                     }
                     st.rerun()
-                st.markdown(f"<div style='text-align:center; font-size:12px; color:gray'>{cand['eval']:+.2f}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='text-align:center; font-size:12px; color:gray; margin-top:-10px; margin-bottom:10px;'>{cand['eval']:+.2f}</div>", unsafe_allow_html=True)
 
-        # Row 2 (Moves 4-6)
+        # Row 2
         cols2 = st.columns(3)
         for i, cand in enumerate(candidates[3:6]):
             idx = i + 3
             with cols2[i]:
-                if st.button(f"#{idx+1} {cand['san']}", key=f"mid_{idx}", use_container_width=True):
+                if st.button(f"{cand['san']}", key=f"mid_{idx}", use_container_width=True):
                     st.session_state.board.push(cand['move'])
                     st.session_state.feedback_data = {"label": "🆗 Playable", "color": "blue", "text": cand['explanation']}
                     st.rerun()
-                st.markdown(f"<div style='text-align:center; font-size:12px; color:gray'>{cand['eval']:+.2f}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='text-align:center; font-size:12px; color:gray; margin-top:-10px; margin-bottom:10px;'>{cand['eval']:+.2f}</div>", unsafe_allow_html=True)
                 
-        # Row 3 (Moves 7-9)
+        # Row 3
         cols3 = st.columns(3)
         for i, cand in enumerate(candidates[6:9]):
             idx = i + 6
             with cols3[i]:
-                if st.button(f"#{idx+1} {cand['san']}", key=f"low_{idx}", use_container_width=True):
+                if st.button(f"{cand['san']}", key=f"low_{idx}", use_container_width=True):
                     st.session_state.board.push(cand['move'])
                     st.session_state.feedback_data = {"label": "⚠️ Risky", "color": "orange", "text": cand['explanation']}
                     st.rerun()
-                st.markdown(f"<div style='text-align:center; font-size:12px; color:gray'>{cand['eval']:+.2f}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='text-align:center; font-size:12px; color:gray; margin-top:-10px; margin-bottom:10px;'>{cand['eval']:+.2f}</div>", unsafe_allow_html=True)
