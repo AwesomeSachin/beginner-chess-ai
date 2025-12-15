@@ -1,0 +1,6 @@
+streamlit
+streamlit-chessboard
+python-chess
+matplotlib
+pandas
+plotly
