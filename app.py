@@ -15,7 +15,7 @@ if 'board' not in st.session_state: st.session_state.board = chess.Board()
 if 'game_moves' not in st.session_state: st.session_state.game_moves = []
 if 'move_index' not in st.session_state: st.session_state.move_index = 0
 if 'last_best_eval' not in st.session_state: st.session_state.last_best_eval = 0.35
-if 'feedback_data' not in st.session_state: st.session_state.feedback_data = None # Stores label, color, AND explanation
+if 'feedback_data' not in st.session_state: st.session_state.feedback_data = None 
 
 # --- HELPER: RENDER BOARD ---
 def render_board(board, arrows=[]):
@@ -42,18 +42,16 @@ def explain_move(board_before, move):
     if board_before.is_capture(move):
         victim = board_before.piece_at(move.to_square)
         if victim:
-            narrative.append(f"Captures the {victim.symbol().upper()} (Material Gain).")
+            narrative.append(f"Captures the {chess.piece_name(victim.piece_type).capitalize()} (Material Gain).")
         else:
             narrative.append("Recaptures material.")
 
     # 2. DID WE SAVE A PIECE? (Defensive Logic)
-    # Check if the moving piece was under attack on its old square
     was_attacked = board_before.is_attacked_by(not board_before.turn, move.from_square)
     if was_attacked:
         narrative.append("Escapes a threat! The piece was under attack.")
 
     # 3. DID WE CREATE A THREAT? (Aggressive Logic)
-    # Check what we are attacking NOW that we weren't before
     new_threats = []
     for sq in board_after.attacks(move.to_square):
         target = board_after.piece_at(sq)
@@ -64,7 +62,7 @@ def explain_move(board_before, move):
     if new_threats:
         narrative.append(f"Creates a direct threat on the {new_threats[0]}!")
 
-    # 4. OPENING CONCEPTS (Early Game)
+    # 4. OPENING CONCEPTS
     if board_before.fullmove_number < 8:
         if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5, chess.C4, chess.C5]:
             narrative.append("Fights for central control.")
@@ -79,16 +77,18 @@ def explain_move(board_before, move):
     if board_after.is_check():
         narrative.append("Delivers Check, forcing a response.")
 
-    # 6. PAWN LOGIC (If no big tactics found)
+    # 6. PAWN LOGIC (Fixed)
     if not narrative and board_before.piece_type_at(move.from_square) == chess.PAWN:
-        if board_before.is_passed(move.to_square):
-            narrative.append("Creates a dangerous Passed Pawn!")
+        # Check if pawn is pushing deep (Rank 6 or 7)
+        rank = chess.square_rank(move.to_square)
+        if (board_before.turn == chess.WHITE and rank >= 5) or (board_before.turn == chess.BLACK and rank <= 2):
+            narrative.append("Pushing the pawn closer to promotion!")
         else:
             narrative.append("Improves pawn structure and takes space.")
 
-    # Fallback if move is subtle
+    # Fallback
     if not narrative:
-        return "A quiet positional move improving piece coordination."
+        return "A solid positional improvement, improving piece coordination."
         
     return " ".join(narrative)
 
@@ -113,7 +113,7 @@ def get_analysis(board, engine_path):
             "eval": score/100,
             "score": score/100,
             "pv": line["pv"][:5],
-            "explanation": explain_move(board, move) # Generate explanation for future moves
+            "explanation": explain_move(board, move) 
         })
     
     engine.quit()
@@ -123,16 +123,13 @@ def judge_move(current_eval, best_eval, board_before, move):
     """Returns Label, Color, AND Detailed Explanation."""
     diff = best_eval - (-current_eval) # Flip perspective
     
-    # 1. Determine Label
     if diff <= 0.2: label, color = "✅ Excellent", "green"
     elif diff <= 0.7: label, color = "🆗 Good", "blue"
     elif diff <= 1.5: label, color = "⚠️ Inaccuracy", "orange"
     elif diff <= 3.0: label, color = "❌ Mistake", "#FF5722"
     else: label, color = "😱 Blunder", "red"
 
-    # 2. Get Logic Explanation
     explanation = explain_move(board_before, move)
-    
     return {"label": label, "color": color, "text": explanation}
 
 # --- UI START ---
@@ -151,7 +148,7 @@ with st.sidebar:
                 st.session_state.board = game.board()
                 st.session_state.move_index = 0
                 st.session_state.feedback_data = None
-                st.session_state.last_best_eval = 0.35 # Reset eval
+                st.session_state.last_best_eval = 0.35 
                 st.rerun()
             except:
                 st.error("Invalid PGN")
@@ -176,7 +173,7 @@ if best_plan:
 
 # === LEFT: BOARD ===
 with col_main:
-    # FEEDBACK BANNER (Shows Result of PREVIOUS move)
+    # FEEDBACK BANNER
     if st.session_state.feedback_data:
         data = st.session_state.feedback_data
         st.markdown(f"""
@@ -189,18 +186,21 @@ with col_main:
     
     st.markdown(render_board(st.session_state.board, arrows), unsafe_allow_html=True)
     
-    # NAVIGATION & SYNC
+    # NAVIGATION & SYNC CHECK
     if st.session_state.game_moves:
         c1, c2, c3 = st.columns([1,2,1])
         
-        # Check Sync
+        # 1. Verify if Board is Synced with Game
         temp_board = chess.Board()
         for i in range(st.session_state.move_index):
             temp_board.push(st.session_state.game_moves[i])
+        
+        # Are we exactly where the game expects us to be?
         on_track = (temp_board.fen() == st.session_state.board.fen())
 
         with c3:
             if on_track:
+                # Show NEXT button only if synced
                 if st.button("Next Move ▶", use_container_width=True) and st.session_state.move_index < len(st.session_state.game_moves):
                     # Capture State BEFORE Move
                     board_before = st.session_state.board.copy()
@@ -219,23 +219,22 @@ with col_main:
                     st.session_state.feedback_data = judge_move(current_eval, expected_eval, board_before, move)
                     st.rerun()
             else:
+                # Show RESUME button if deviated
                 if st.button("⏩ Resume Game Line", use_container_width=True):
-                    # Sync Logic
+                    # Hard Sync
                     st.session_state.board = temp_board
                     if st.session_state.move_index < len(st.session_state.game_moves):
                         move = st.session_state.game_moves[st.session_state.move_index]
                         
-                        # We need to analyze 'temp_board' to get the expected eval for proper judging
+                        # Recalculate expectation for correct feedback
                         resume_best, _ = get_analysis(temp_board, STOCKFISH_PATH)
                         exp_eval = resume_best['eval'] if resume_best else 0
                         
                         st.session_state.board.push(move)
                         st.session_state.move_index += 1
                         
-                        # Analyze result
                         new_best, _ = get_analysis(st.session_state.board, STOCKFISH_PATH)
                         curr_eval = new_best['eval'] if new_best else 0
-                        
                         st.session_state.feedback_data = judge_move(curr_eval, exp_eval, temp_board, move)
                     st.rerun()
 
@@ -243,7 +242,9 @@ with col_main:
             if st.button("◀ Undo"):
                 if st.session_state.board.move_stack:
                     st.session_state.board.pop()
-                    if on_track and st.session_state.move_index > 0: st.session_state.move_index -= 1
+                    # Only decrement index if we are undoing a GAME move
+                    if on_track and st.session_state.move_index > 0: 
+                        st.session_state.move_index -= 1
                     st.session_state.feedback_data = None
                     st.rerun()
     else:
@@ -256,7 +257,7 @@ with col_main:
 # === RIGHT: INFO ===
 with col_info:
     
-    st.subheader("💡 Engine Suggestion (Next)")
+    st.subheader("💡 Engine Suggestion")
     if best_plan:
         st.metric("Eval", f"{best_plan['eval']:+.2f}")
         st.info(f"**Best Move:** {best_plan['san']}")
@@ -272,13 +273,11 @@ with col_info:
                 if st.button(f"{cand['san']}", key=f"top_{i}", use_container_width=True):
                     # Capture State
                     board_before = st.session_state.board.copy()
-                    expected_eval = candidates[0]['eval']
                     
                     # Make Move
                     st.session_state.board.push(cand['move'])
                     
-                    # Feedback (Since we clicked a candidate, we know it's good)
-                    # We just use the candidate's own explanation
+                    # Feedback (Auto-Green because it's a recommended move)
                     st.session_state.feedback_data = {
                         "label": "✅ Best Move" if i==0 else "🆗 Good Alternative",
                         "color": "green" if i==0 else "blue",
