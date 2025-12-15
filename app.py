@@ -29,58 +29,67 @@ def render_board(board, arrows=[]):
     b64 = base64.b64encode(board_svg.encode('utf-8')).decode("utf-8")
     return f'<img src="data:image/svg+xml;base64,{b64}" width="100%" style="display:block; margin-bottom:10px;" />'
 
-# --- LOGIC: EXPLANATION ---
+# --- LOGIC: DEEP EXPLANATION GENERATOR (Restored V9 Logic) ---
 def explain_move(board_before, move):
+    """
+    Compares state BEFORE and AFTER the move to find the LOGICAL reason.
+    """
     narrative = []
     board_after = board_before.copy()
     board_after.push(move)
     
-    # 1. CAPTURES
+    # 1. DID WE CAPTURE?
     if board_before.is_capture(move):
         victim = board_before.piece_at(move.to_square)
         if victim:
-            narrative.append(f"Captures {chess.piece_name(victim.piece_type)}.")
+            narrative.append(f"Captures the {chess.piece_name(victim.piece_type).capitalize()} (Material Gain).")
         else:
             narrative.append("Recaptures material.")
 
-    # 2. DEFENSE
+    # 2. DID WE SAVE A PIECE? (Defensive Logic)
     was_attacked = board_before.is_attacked_by(not board_before.turn, move.from_square)
     if was_attacked:
-        narrative.append("Escapes a threat.")
+        narrative.append("Escapes a threat! The piece was under attack.")
 
-    # 3. THREATS
+    # 3. DID WE CREATE A THREAT? (Aggressive Logic)
     new_threats = []
     for sq in board_after.attacks(move.to_square):
         target = board_after.piece_at(sq)
-        if target and target.color != board_before.turn:
+        if target and target.color != board_before.turn: # Enemy piece
             if target.piece_type == chess.QUEEN: new_threats.append("Queen")
             elif target.piece_type == chess.ROOK: new_threats.append("Rook")
     
     if new_threats:
-        narrative.append(f"Attacks the {new_threats[0]}!")
+        narrative.append(f"Creates a direct threat on the {new_threats[0]}!")
 
-    # 4. OPENING / STRATEGY
-    if board_before.fullmove_number < 12:
-        if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
-            narrative.append("Controls the center.")
+    # 4. OPENING CONCEPTS
+    if board_before.fullmove_number < 10:
+        if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5, chess.C4, chess.C5]:
+            narrative.append("Fights for central control.")
+        elif board_before.piece_type_at(move.from_square) == chess.KNIGHT:
+            narrative.append("Develops the Knight to an active square.")
         elif board_before.is_castling(move):
-            narrative.append("Castles for safety.")
-        elif board_before.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
-            narrative.append("Develops piece.")
+            narrative.append("Castles for King Safety.")
 
-    # 5. CHECK
-    if board_after.is_checkmate(): return "CHECKMATE!"
-    if board_after.is_check(): narrative.append("Delivers Check.")
+    # 5. CHECK / MATE
+    if board_after.is_checkmate():
+        return "CHECKMATE! The game is won."
+    if board_after.is_check():
+        narrative.append("Delivers Check, forcing a response.")
 
-    # 6. PAWN
+    # 6. PAWN LOGIC
     if not narrative and board_before.piece_type_at(move.from_square) == chess.PAWN:
+        # Check if pawn is pushing deep (Rank 6 or 7)
         rank = chess.square_rank(move.to_square)
         if (board_before.turn == chess.WHITE and rank >= 5) or (board_before.turn == chess.BLACK and rank <= 2):
-            narrative.append("Pushes passed pawn.")
+            narrative.append("Pushing the pawn closer to promotion!")
         else:
-            narrative.append("Improves structure.")
+            narrative.append("Improves pawn structure and takes space.")
 
-    if not narrative: return "Positional improvement."
+    # Fallback
+    if not narrative:
+        return "A solid positional improvement, improving piece coordination."
+        
     return " ".join(narrative)
 
 # --- LOGIC: ANALYSIS ---
@@ -90,6 +99,7 @@ def get_analysis(board, engine_path):
     except:
         return None, []
     
+    # Analyze Top 9 moves for the grid
     info = engine.analyse(board, chess.engine.Limit(time=0.4), multipv=9)
     candidates = []
     
@@ -234,7 +244,7 @@ with col_main:
 # === RIGHT: INFO PANEL ===
 with col_info:
     
-    # 1. COMPACT FEEDBACK BANNER
+    # 1. COMPACT FEEDBACK BANNER (Right Side Top)
     if st.session_state.feedback_data:
         data = st.session_state.feedback_data
         st.markdown(f"""
@@ -262,7 +272,7 @@ with col_info:
     
     st.divider()
 
-    # 3. PLAYABLE MOVES
+    # 3. PLAYABLE MOVES (9 Moves Grid)
     st.subheader("Explore Alternative Moves")
     if candidates:
         # Row 1
