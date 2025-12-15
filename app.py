@@ -3,21 +3,22 @@ import chess
 import chess.engine
 import chess.svg
 import chess.pgn
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import io
 import base64
 
 # --- CONFIG ---
-st.set_page_config(page_title="Pro Chess Analyst", layout="wide")
+st.set_page_config(page_title="Chess Game Reviewer", layout="wide")
 STOCKFISH_PATH = "/usr/games/stockfish"
 
-# --- HELPER: RENDER BOARD WITH ARROWS ---
+# --- SESSION STATE INITIALIZATION ---
+if 'game_moves' not in st.session_state: st.session_state.game_moves = [] # List of moves from PGN
+if 'current_index' not in st.session_state: st.session_state.current_index = 0 # Current move number
+if 'board' not in st.session_state: st.session_state.board = chess.Board()
+if 'analysis_cache' not in st.session_state: st.session_state.analysis_cache = {} # Store analysis to avoid re-running
+
+# --- HELPER: RENDER BOARD ---
 def render_board(board, arrows=[]):
-    """
-    Renders the board as SVG with optional arrows for plans.
-    """
+    """Renders board as SVG image."""
     board_svg = chess.svg.board(
         board=board, 
         size=450,
@@ -28,202 +29,182 @@ def render_board(board, arrows=[]):
     b64 = base64.b64encode(board_svg.encode('utf-8')).decode("utf-8")
     return f'<img src="data:image/svg+xml;base64,{b64}" width="100%" />'
 
-# --- LOGIC: BEGINNER ENGINE & CLASSIFICATION ---
-def get_beginner_score(board, move, raw_score):
-    score = 0
-    # Strategic Layer (Leela-style Heuristics)
-    if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]: score += 0.5
-    if board.fullmove_number < 10 and board.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]: score += 0.3
+# --- LOGIC: CLASSIFICATION SYSTEM ---
+def classify_move(played_eval, best_eval, move_num):
+    """
+    Returns (Label, Color) based on centipawn loss.
+    """
+    diff = best_eval - played_eval
     
-    # Tactical Layer
-    board.push(move)
-    if board.is_check(): score += 1.5
-    if board.is_capture(move): score += 1.0
-    board.pop()
-    return score + (raw_score / 100)
+    # 1. Book Moves (Approximate: Opening phase + low error)
+    if move_num <= 10 and diff < 0.3:
+        return "📖 Book Move", "gray"
+        
+    # 2. Brilliance (Simple Heuristic: You found the only winning move)
+    # (Real brilliance requires sacrifice detection, this is a simplified version)
+    if diff < 0.05 and best_eval > 2.0:
+        return "🔥 Brilliant!", "#2196F3" # Blue
+        
+    # 3. Standard Classification
+    if diff < 0.2: return "✅ Best Move", "green"
+    if diff < 0.5: return "🆗 Good / Excellent", "#8BC34A" # Light Green
+    if diff < 1.0: return "⚠️ Inaccuracy", "#FFC107" # Orange
+    if diff < 2.0: return "❌ Mistake", "#FF9800" # Dark Orange
+    return "😱 Blunder", "red"
 
-def classify_move(eval_diff):
-    """Classifies a move based on how much evaluation was lost."""
-    if eval_diff <= 0.2: return "Best / Excellent", "green"
-    if eval_diff <= 0.5: return "Good", "blue"
-    if eval_diff <= 1.0: return "Inaccuracy", "orange"
-    return "Blunder", "red"
-
-def analyze_position(board, engine_path):
+# --- LOGIC: BEGINNER ENGINE ---
+def get_beginner_plan(board, engine_path):
     try:
         engine = chess.engine.SimpleEngine.popen_uci(engine_path)
     except:
-        return []
-    
-    limit = chess.engine.Limit(time=0.6)
-    # Get top 5 moves
-    info = engine.analyse(board, limit, multipv=5)
+        return None
+
+    # Get Top 3 moves to find the "Simple" one
+    info = engine.analyse(board, chess.engine.Limit(time=0.4), multipv=3)
     candidates = []
     
     for line in info:
         move = line["pv"][0]
-        raw = line["score"].relative.score(mate_score=10000)
-        if raw is None: raw = 0
+        score = line["score"].relative.score(mate_score=10000)
+        if score is None: score = 0
         
-        # Calculate Beginner Score
-        my_score = get_beginner_score(board, move, raw)
+        # Beginner Heuristics
+        beginner_bonus = 0
+        board.push(move)
+        if board.is_check(): beginner_bonus += 2.0
+        if board.is_capture(move): beginner_bonus += 1.0
+        # Strategic Center Control
+        if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]: beginner_bonus += 0.5
+        board.pop()
         
-        candidates.append({
-            "move": move,
-            "san": board.san(move),
-            "score": my_score,
-            "raw_eval": raw,
-            "pv": line["pv"][:4] # Plan (next 4 moves)
-        })
+        final_score = (score/100) + beginner_bonus
+        candidates.append({"move": move, "san": board.san(move), "score": final_score, "pv": line["pv"][:4]})
     
     engine.quit()
-    # Sort by YOUR Beginner Engine score
     candidates.sort(key=lambda x: x['score'], reverse=True)
-    return candidates
+    return candidates[0] if candidates else None
 
-# --- TAB LAYOUT ---
-tab1, tab2 = st.tabs(["♟️ Interactive Board & Training", "📊 Game Review (Chess.com Import)"])
+# --- UI LAYOUT ---
+st.title("♟️ Game Review & Analysis")
 
-# ==========================================
-# TAB 1: INTERACTIVE PLAY
-# ==========================================
-with tab1:
-    col_main, col_sidebar = st.columns([1.5, 1])
+# 1. SIDEBAR: LOAD GAME
+with st.sidebar:
+    st.header("1. Paste Game")
+    pgn_input = st.text_area("Paste PGN here:", height=200)
     
-    if 'board' not in st.session_state: st.session_state.board = chess.Board()
-    if 'arrows' not in st.session_state: st.session_state.arrows = []
-
-    with col_main:
-        # Render Board with Arrows
-        st.markdown(render_board(st.session_state.board, st.session_state.arrows), unsafe_allow_html=True)
-        
-        # Controls
-        c1, c2, c3 = st.columns(3)
-        if c1.button("⬅️ Undo Move"):
-            if st.session_state.board.move_stack:
-                st.session_state.board.pop()
-                st.session_state.arrows = []
-                st.rerun()
-        if c2.button("🔄 Reset Board"):
-            st.session_state.board.reset()
-            st.session_state.arrows = []
-            st.rerun()
-        if c3.button("🧠 Show Plan (Arrows)"):
-            with st.spinner("Calculating Plan..."):
-                candidates = analyze_position(st.session_state.board, STOCKFISH_PATH)
-                if candidates:
-                    top_move = candidates[0]
-                    # Arrow for the best move (Green)
-                    pv_arrows = [chess.svg.Arrow(top_move['move'].from_square, top_move['move'].to_square, color="green")]
-                    # Arrow for the response (Blue) if available
-                    if len(top_move['pv']) > 1:
-                        m2 = top_move['pv'][1]
-                        pv_arrows.append(chess.svg.Arrow(m2.from_square, m2.to_square, color="blue"))
-                    st.session_state.arrows = pv_arrows
-                    st.rerun()
-
-    with col_sidebar:
-        st.subheader("Suggested Moves")
-        st.caption("Click a move to play it instantly. Sorted by Beginner Priority.")
-        
-        # Run fast analysis for the list
-        if not st.session_state.board.is_game_over():
-            candidates = analyze_position(st.session_state.board, STOCKFISH_PATH)
-            
-            if candidates:
-                for i, cand in enumerate(candidates):
-                    # Create a button for each move
-                    btn_label = f"{i+1}. {cand['san']} (Score: {cand['score']:.1f})"
-                    if st.button(btn_label, key=f"move_{i}"):
-                        st.session_state.board.push(cand['move'])
-                        st.session_state.arrows = [] # Clear arrows
-                        st.rerun()
-            else:
-                st.warning("Engine starting...")
-        else:
-            st.success("Game Over!")
-
-# ==========================================
-# TAB 2: GAME REVIEW & GRAPHS
-# ==========================================
-with tab2:
-    st.header("Analyze Your Game")
-    pgn_input = st.text_area("Paste PGN from Chess.com / Lichess:", height=150)
-    
-    if st.button("Run Full Analysis"):
+    if st.button("Load Game Review"):
         if pgn_input:
-            with st.spinner("Running deep analysis... This may take a minute."):
-                # Use StringIO to read the string as a file
-                pgn_io = io.StringIO(pgn_input)
-                try:
-                    game = chess.pgn.read_game(pgn_io)
-                except:
-                    game = None
+            pgn_io = io.StringIO(pgn_input)
+            try:
+                game = chess.pgn.read_game(pgn_io)
+                st.session_state.game_moves = list(game.mainline_moves())
+                st.session_state.current_index = 0
+                st.session_state.board = game.board() # Reset to start
+                st.session_state.analysis_cache = {} # Clear cache
+                st.success(f"Loaded {len(st.session_state.game_moves)} moves!")
+                st.rerun()
+            except:
+                st.error("Invalid PGN.")
+
+# 2. MAIN AREA
+if st.session_state.game_moves:
+    col_board, col_analysis = st.columns([1, 1.2])
+
+    # --- BOARD CONTROLS ---
+    with col_board:
+        # Reconstruct board to current index
+        review_board = chess.Board()
+        for i in range(st.session_state.current_index):
+            review_board.push(st.session_state.game_moves[i])
+            
+        st.markdown(render_board(review_board), unsafe_allow_html=True)
+        
+        # Navigation Buttons
+        c1, c2, c3 = st.columns([1, 2, 1])
+        with c1:
+            if st.button("◀ Prev") and st.session_state.current_index > 0:
+                st.session_state.current_index -= 1
+                st.rerun()
+        with c3:
+            if st.button("Next ▶") and st.session_state.current_index < len(st.session_state.game_moves):
+                st.session_state.current_index += 1
+                st.rerun()
                 
-                if game is None:
-                    st.error("Invalid PGN format.")
-                else:
-                    analysis_data = []
-                    board = game.board()
+        st.caption(f"Move {st.session_state.current_index} of {len(st.session_state.game_moves)}")
+
+    # --- ANALYSIS PANEL ---
+    with col_analysis:
+        st.header("Move Feedback")
+        
+        if st.session_state.current_index > 0:
+            # We analyze the move that was JUST played (current_index - 1)
+            played_move = st.session_state.game_moves[st.session_state.current_index - 1]
+            
+            # Use a temporary board state BEFORE that move
+            temp_board = chess.Board()
+            for i in range(st.session_state.current_index - 1):
+                temp_board.push(st.session_state.game_moves[i])
+            
+            st.subheader(f"You played: **{temp_board.san(played_move)}**")
+            
+            # --- RUN ANALYSIS (Cached for speed) ---
+            cache_key = f"{st.session_state.current_index}"
+            if cache_key not in st.session_state.analysis_cache:
+                with st.spinner("Analyzing move quality..."):
                     engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
                     
-                    moves = list(game.mainline_moves())
+                    # 1. Best Eval (Before Move)
+                    info = engine.analyse(temp_board, chess.engine.Limit(time=0.1))
+                    best_eval = info["score"].relative.score(mate_score=10000) / 100
                     
-                    for i, move in enumerate(moves):
-                        # 1. ANALYZE BEFORE MOVE
-                        info = engine.analyse(board, chess.engine.Limit(time=0.1))
-                        best_eval = info["score"].relative.score(mate_score=10000) / 100
-                        best_move_obj = info["pv"][0]
-                        
-                        # CAPTURE STRINGS NOW (Fixes the crash)
-                        stockfish_best_san = board.san(best_move_obj)
-                        played_move_san = board.san(move)
-                        
-                        # Get Beginner Engine's Opinion
-                        my_recs = analyze_position(board, STOCKFISH_PATH)
-                        my_choice = my_recs[0]['san'] if my_recs else "?"
-                        
-                        # 2. MAKE MOVE
-                        board.push(move)
-                        
-                        # 3. ANALYZE AFTER MOVE
-                        info_after = engine.analyse(board, chess.engine.Limit(time=0.1))
-                        curr_eval = info_after["score"].relative.score(mate_score=10000) / 100
-                        
-                        # Calculate Loss
-                        diff = best_eval - (-curr_eval)
-                        loss = max(0, diff)
-                        
-                        label, color = classify_move(loss)
-
-                        analysis_data.append({
-                            "Move Number": i+1,
-                            "Played": played_move_san,
-                            "Loss (CP)": round(loss, 2),
-                            "Classification": label,
-                            "Stockfish Best": stockfish_best_san,
-                            "My Engine Best": my_choice
-                        })
+                    # 2. Played Eval (After Move)
+                    temp_board.push(played_move)
+                    info_after = engine.analyse(temp_board, chess.engine.Limit(time=0.1))
+                    played_eval = info_after["score"].relative.score(mate_score=10000) / 100 # Opponent view
+                    played_eval = -played_eval # Flip back to our view
+                    temp_board.pop()
+                    
+                    # 3. Beginner Plan
+                    beginner_rec = get_beginner_plan(temp_board, STOCKFISH_PATH)
                     
                     engine.quit()
                     
-                    # --- RESULTS ---
-                    if analysis_data:
-                        df = pd.DataFrame(analysis_data)
-                        
-                        # 1. Accuracy Graph
-                        st.subheader("1. Move Quality Distribution")
-                        class_counts = df['Classification'].value_counts()
-                        fig1 = px.pie(values=class_counts.values, names=class_counts.index, 
-                                      title="Your Move Quality", color_discrete_sequence=px.colors.sequential.RdBu)
-                        st.plotly_chart(fig1, use_container_width=True)
-
-                        # 2. Engine Comparison
-                        st.subheader("2. Advantage Loss Per Move")
-                        fig2 = px.line(df, x="Move Number", y="Loss (CP)", title="Lower is Better (Spikes = Blunders)")
-                        st.plotly_chart(fig2, use_container_width=True)
-
-                        # 3. Detailed Table
-                        st.subheader("3. Move-by-Move Feedback")
-                        st.dataframe(df[["Move Number", "Played", "Classification", "Stockfish Best", "My Engine Best"]])
-
+                    st.session_state.analysis_cache[cache_key] = {
+                        "best_eval": best_eval,
+                        "played_eval": played_eval,
+                        "beginner_rec": beginner_rec
+                    }
+            
+            # --- DISPLAY RESULTS ---
+            data = st.session_state.analysis_cache[cache_key]
+            label, color = classify_move(data["played_eval"], data["best_eval"], st.session_state.current_index)
+            
+            # 1. Classification Badge
+            st.markdown(f"""
+            <div style="background-color: {color}; color: white; padding: 10px; border-radius: 5px; text-align: center; font-weight: bold; font-size: 20px;">
+                {label}
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # 2. Evaluations
+            c_a, c_b = st.columns(2)
+            c_a.metric("Eval (Before)", f"{data['best_eval']:+.2f}")
+            c_b.metric("Eval (After)", f"{data['played_eval']:+.2f}")
+            
+            st.divider()
+            
+            # 3. Beginner Plan Comparison
+            rec = data['beginner_rec']
+            if rec and rec['san'] != temp_board.san(played_move):
+                st.info(f"💡 **Beginner Engine Plan:** {rec['san']}")
+                plan_str = temp_board.variation_san(rec['pv'])
+                st.write(f"**The Plan:** {plan_str}")
+                st.caption("This plan is simpler or more forcing than what you played.")
+            else:
+                st.success("Your move matched the Beginner Engine's plan!")
+                
+        else:
+            st.info("Start of game. Press Next to review moves.")
+else:
+    st.info("👈 Paste a PGN in the sidebar to start reviewing!")
+            
