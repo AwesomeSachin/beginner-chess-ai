@@ -88,17 +88,22 @@ with tab1:
             st.session_state.board = chess.Board(move_data["fen"])
             st.rerun()
             
-    with col_eval:
-        st.subheader("Live Analysis")
-        if st.button("Analyze Now"):
-            result = analyze_move_sequence(st.session_state.board, STOCKFISH_PATH)
-            if result:
-                st.success(f"**Recommended:** {result['san']}")
-                
-                # Show the 5-move plan
-                plan_str = st.session_state.board.variation_san(result['pv'])
-                st.info(f"**The Plan (5 Moves):** {plan_str}")
-                st.caption("This sequence prioritizes safety and simple attacks.")
+    with col_board:
+        # Initialize board
+        if 'board' not in st.session_state: 
+            st.session_state.board = chess.Board()
+
+        # Render the board
+        # key="chess" ensures it doesn't redraw unnecessarily
+        move_data = st_chess(st.session_state.board.fen(), key="chess")
+        
+        # Check if user made a move
+        if move_data:
+            # The library returns the new FEN directly
+            new_fen = move_data
+            if new_fen != st.session_state.board.fen():
+                st.session_state.board = chess.Board(new_fen)
+                st.rerun()
 
 # === TAB 2: UPLOAD & ANALYZE GAME ===
 with tab2:
@@ -199,4 +204,5 @@ with tab3:
                               title="Model Accuracy Convergence (Stockfish Agreement Rate)")
             st.plotly_chart(fig_acc)
             
+
             st.success("Benchmark Complete. The graph shows your model's consistency.")
