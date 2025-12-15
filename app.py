@@ -1,4 +1,5 @@
 import streamlit as st
+from streamlit_chess import st_chess
 from streamlit_chessboard import chessboard
 import chess
 import chess.engine
@@ -206,3 +207,4 @@ with tab3:
             
 
             st.success("Benchmark Complete. The graph shows your model's consistency.")
+
