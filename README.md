@@ -32,7 +32,7 @@ This project involves:
 ## 🛠️ Important Links & Tools:
 
 - **[Live Demo App](https://beginnerchessai.streamlit.app/):** Interact with the live AI.
-- **[Google Colab Notebook](https://colab.research.google.com/):** View the full training pipeline, data extraction, and model evaluation code. *(Replace with your actual share link)*
+- **[Google Colab Notebook](https://colab.research.google.com/drive/1C2gJaQZedg_ivRwI6jVpdt47uuQp5l4G?usp=sharing):** View the full training pipeline, data extraction, and model evaluation code.
 - **[Lichess Open Database](https://database.lichess.org/):** The source of the 20,000 beginner games used for training.
 - **[Stockfish Engine](https://stockfishchess.org/):** The backend calculation engine.
 - **[Streamlit Documentation](https://docs.streamlit.io/):** The framework used for the frontend UI.
