@@ -1,6 +1,6 @@
 # Deep Logic Chess: An Explainable AI (XAI) Project
 
-Welcome to the **Deep Logic Chess** repository! 🚀  
+Welcome to the **Deep Logic Chess** repository! ♟️  
 This project demonstrates a **hybrid Machine Learning and Heuristic AI** solution designed to teach chess to beginners. Unlike traditional engines that simply calculate the "best" move, this system uses a trained Logistic Regression model to **rank moves based on human learnability** and generates natural language explanations (XAI) for every decision.
 
 ---
