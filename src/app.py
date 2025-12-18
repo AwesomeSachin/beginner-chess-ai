@@ -1,271 +1,261 @@
-# ============================================================
+# =========================================================
 # Deep Logic Chess (XAI Edition)
-# app.py — Central Nervous System
-# ============================================================
+# Central Nervous System — app.py
+# =========================================================
 
 import streamlit as st
 import chess
 import chess.engine
 import chess.svg
-import base64
+import chess.pgn
 import io
+import base64
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
+# =========================================================
+# CONFIG
+# =========================================================
+st.set_page_config(page_title="Deep Logic Chess", layout="wide")
 
-STOCKFISH_PATH = "/usr/games/stockfish"
+STOCKFISH_PATH = "/usr/games/stockfish"  # Streamlit Cloud compatible
 
-# ---- ML Weights learned from Google Colab (BEGINNER <1500) ----
-ML_WEIGHTS = {
-    "check": 0.5792,
-    "capture": 0.1724,
-    "center": 0.0365
-}
+# ML Weights (Learned in Colab)
+W_CHECK   = 0.5792
+W_CAPTURE = 0.1724
+W_CENTER  = 0.0365
 
-CENTER_SQUARES = [chess.D4, chess.D5, chess.E4, chess.E5]
+CENTER_SQUARES = [chess.E4, chess.D4, chess.E5, chess.D5]
 
-# ============================================================
-# SESSION STATE (APP MEMORY)
-# ============================================================
-
+# =========================================================
+# SESSION STATE (MEMORY)
+# =========================================================
 if "board" not in st.session_state:
     st.session_state.board = chess.Board()
 
-if "history" not in st.session_state:
-    st.session_state.history = []
+if "game_moves" not in st.session_state:
+    st.session_state.game_moves = []
+
+if "move_index" not in st.session_state:
+    st.session_state.move_index = 0
 
 if "feedback" not in st.session_state:
     st.session_state.feedback = None
 
-if "best_move" not in st.session_state:
-    st.session_state.best_move = None
+# =========================================================
+# HELPER: RENDER BOARD
+# =========================================================
+def render_board(board, arrow=None):
+    arrows = []
+    if arrow:
+        arrows.append(chess.svg.Arrow(arrow.from_square, arrow.to_square, color="#4CAF50"))
 
-# ============================================================
-# HELPER FUNCTIONS
-# ============================================================
-
-def render_board(board, arrows=None):
-    """Convert board state to SVG and render in Streamlit"""
-    svg = chess.svg.board(board, arrows=arrows, size=420)
-    b64 = base64.b64encode(svg.encode("utf-8")).decode("utf-8")
-    st.markdown(f'<img src="data:image/svg+xml;base64,{b64}"/>',
-                unsafe_allow_html=True)
-
-
-def is_check(board, move):
-    board.push(move)
-    result = board.is_check()
-    board.pop()
-    return result
-
-
-def is_capture(board, move):
-    return board.is_capture(move)
-
-
-def controls_center(move):
-    return move.to_square in CENTER_SQUARES
-
-
-# ============================================================
-# STOCKFISH + ML ANALYSIS ENGINE
-# ============================================================
-
-def get_analysis(board):
-    """
-    Returns a ranked list of moves after injecting ML weights
-    """
-    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
-
-    info = engine.analyse(
-        board,
-        chess.engine.Limit(depth=14),
-        multipv=9
+    svg = chess.svg.board(
+        board=board,
+        size=520,
+        arrows=arrows,
+        lastmove=board.peek() if board.move_stack else None
     )
 
-    scored_moves = []
+    b64 = base64.b64encode(svg.encode()).decode()
+    return f"<img src='data:image/svg+xml;base64,{b64}'/>"
 
-    for item in info:
-        move = item["pv"][0]
-        score = item["score"].white().score(mate_score=10000) / 100
+# =========================================================
+# CORE ANALYSIS ENGINE
+# =========================================================
+def analyze_position(board):
+    """
+    1. Ask Stockfish for top moves
+    2. Apply ML weights
+    3. Return ranked candidates
+    """
 
-        bonus = 0.0
+    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
 
-        if is_check(board, move):
-            bonus += ML_WEIGHTS["check"]
+    info = engine.analyse(board, chess.engine.Limit(time=0.4), multipv=5)
 
-        if is_capture(board, move):
-            bonus += ML_WEIGHTS["capture"]
+    candidates = []
 
-        if controls_center(move):
-            bonus += ML_WEIGHTS["center"]
+    best_raw = info[0]["score"].relative.score(mate_score=10000) or 0
 
-        scored_moves.append({
+    for line in info:
+        move = line["pv"][0]
+        raw = line["score"].relative.score(mate_score=10000) or 0
+
+        bonus = 0
+        board.push(move)
+
+        if board.is_check():
+            bonus += W_CHECK
+        if board.is_capture(move):
+            bonus += W_CAPTURE
+        if move.to_square in CENTER_SQUARES:
+            bonus += W_CENTER
+
+        board.pop()
+
+        final_score = (raw / 100) + bonus
+
+        candidates.append({
             "move": move,
-            "raw_score": score,
-            "final_score": score + bonus
+            "san": board.san(move),
+            "raw": raw / 100,
+            "score": final_score
         })
 
     engine.quit()
 
-    scored_moves.sort(key=lambda x: x["final_score"], reverse=True)
-    return scored_moves
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    return candidates, best_raw / 100
 
+# =========================================================
+# EXPLANATION ENGINE (GOOD MOVE)
+# =========================================================
+def explain_good(board, move):
+    reasons = []
 
-# ============================================================
-# EXPLANATION LOGIC (XAI)
-# ============================================================
+    if board.is_capture(move):
+        piece = board.piece_at(move.to_square)
+        if piece:
+            reasons.append(f"Captures {chess.piece_name(piece.piece_type)}.")
 
-def explain_good_move(board, move):
-    explanations = []
-
-    if is_capture(board, move):
-        explanations.append("Captures material")
-
-    if is_check(board, move):
-        explanations.append("Checks the king")
-
-    if controls_center(move):
-        explanations.append("Improves center control")
-
-    if not explanations:
-        explanations.append("Solid improving move")
-
-    return " & ".join(explanations)
-
-
-def explain_bad_move(board, move, best_move):
     board.push(move)
-    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
-    reply = engine.analyse(board, chess.engine.Limit(depth=12))
-    engine.quit()
+    if board.is_check():
+        reasons.append("Gives check.")
+
     board.pop()
 
-    if reply["score"].white().score(mate_score=10000) < -200:
-        return "Blunder. You left a piece en prise."
+    if move.to_square in CENTER_SQUARES:
+        reasons.append("Controls the center.")
 
-    return "Inaccurate. Missed a stronger continuation."
+    if board.is_castling(move):
+        reasons.append("Castles for king safety.")
 
+    if not reasons:
+        reasons.append("Improves position.")
 
-# ============================================================
-# MOVE JUDGMENT ENGINE
-# ============================================================
+    return " ".join(reasons)
 
-def judge_move(board, played_move):
-    analysis = get_analysis(board)
+# =========================================================
+# EXPLANATION ENGINE (BAD MOVE)
+# =========================================================
+def explain_bad(board, move, eval_drop):
+    board_after = board.copy()
+    board_after.push(move)
 
-    best = analysis[0]
-    best_move = best["move"]
-    best_score = best["final_score"]
+    # Hung piece detection
+    if eval_drop > 1.0:
+        if board_after.is_attacked_by(board_after.turn, move.to_square):
+            if not board_after.is_attacked_by(not board_after.turn, move.to_square):
+                return "Blunder. You left a piece hanging."
 
-    played_score = None
-    for item in analysis:
-        if item["move"] == played_move:
-            played_score = item["final_score"]
-            break
+    if eval_drop > 0.7:
+        return "Mistake. This move weakens your position."
 
-    if played_score is None:
-        played_score = best_score - 1.5
+    return "Inaccuracy. A passive move."
 
-    diff = best_score - played_score
+# =========================================================
+# MOVE JUDGMENT
+# =========================================================
+def judge_move(board_before, played_move, best_eval, new_eval):
+    diff = best_eval - new_eval
 
-    if diff < 0.2:
-        return ("good", explain_good_move(board, played_move), best_move)
-
-    elif diff < 1.0:
-        return ("ok", "Playable, but not optimal.", best_move)
-
+    if diff <= 0.2:
+        return "✅ Excellent", "green", explain_good(board_before, played_move)
+    elif diff <= 0.5:
+        return "🆗 Good", "#2196F3", explain_good(board_before, played_move)
+    elif diff <= 1.2:
+        return "⚠️ Inaccuracy", "orange", explain_bad(board_before, played_move, diff)
+    elif diff <= 2.5:
+        return "❌ Mistake", "#FF5722", explain_bad(board_before, played_move, diff)
     else:
-        return ("bad", explain_bad_move(board, played_move, best_move), best_move)
+        return "😱 Blunder", "red", explain_bad(board_before, played_move, diff)
 
+# =========================================================
+# UI
+# =========================================================
+st.title("♟️ Deep Logic Chess (XAI Tutor)")
 
-# ============================================================
-# STREAMLIT UI
-# ============================================================
+# ---------------- SIDEBAR ----------------
+with st.sidebar:
+    st.header("Load PGN")
+    pgn_text = st.text_area("Paste PGN", height=120)
 
-st.set_page_config(page_title="Deep Logic Chess (XAI)", layout="wide")
-
-st.title("♟️ Deep Logic Chess — Explainable AI Tutor")
-st.caption("Stockfish + Human ML Logic (Beginner <1500 Elo)")
-
-# ------------------------------------------------------------
-# SIDEBAR (PGN LOADER)
-# ------------------------------------------------------------
-
-st.sidebar.header("📄 Load Game (PGN)")
-pgn_text = st.sidebar.text_area("Paste PGN here")
-
-if st.sidebar.button("Load PGN"):
-    game = chess.pgn.read_game(io.StringIO(pgn_text))
-    board = game.board()
-    for move in game.mainline_moves():
-        board.push(move)
-    st.session_state.board = board
-    st.session_state.history = []
-    st.session_state.feedback = None
-
-# ------------------------------------------------------------
-# MAIN LAYOUT
-# ------------------------------------------------------------
-
-col1, col2 = st.columns([1.1, 0.9])
-
-with col1:
-    arrows = []
-    if st.session_state.best_move:
-        arrows = [(st.session_state.best_move.from_square,
-                   st.session_state.best_move.to_square)]
-    render_board(st.session_state.board, arrows)
-
-    c1, c2 = st.columns(2)
-
-    if c1.button("▶ Next Move"):
-        analysis = get_analysis(st.session_state.board)
-        move = analysis[0]["move"]
-
-        verdict, explanation, best_move = judge_move(
-            st.session_state.board, move
-        )
-
-        st.session_state.board.push(move)
-        st.session_state.feedback = (verdict, explanation)
-        st.session_state.best_move = best_move
-
-    if c2.button("⏪ Undo"):
-        if st.session_state.board.move_stack:
-            st.session_state.board.pop()
+    if st.button("Load Game"):
+        try:
+            game = chess.pgn.read_game(io.StringIO(pgn_text))
+            st.session_state.game_moves = list(game.mainline_moves())
+            st.session_state.board = game.board()
+            st.session_state.move_index = 0
             st.session_state.feedback = None
-            st.session_state.best_move = None
+            st.rerun()
+        except:
+            st.error("Invalid PGN")
 
-# ------------------------------------------------------------
-# FEEDBACK PANEL
-# ------------------------------------------------------------
+    if st.button("Reset Board"):
+        st.session_state.board.reset()
+        st.session_state.game_moves = []
+        st.session_state.feedback = None
+        st.rerun()
 
-with col2:
-    st.subheader("🧠 AI Feedback")
+# ---------------- MAIN LAYOUT ----------------
+col_board, col_info = st.columns([1.3, 1])
+
+# ================= BOARD ==================
+with col_board:
+    candidates, best_eval = analyze_position(st.session_state.board)
+    best_move = candidates[0]["move"] if candidates else None
+
+    st.markdown(render_board(st.session_state.board, best_move), unsafe_allow_html=True)
+
+    if st.session_state.game_moves:
+        if st.button("Next ▶"):
+            board_before = st.session_state.board.copy()
+            move = st.session_state.game_moves[st.session_state.move_index]
+            st.session_state.board.push(move)
+            st.session_state.move_index += 1
+
+            new_candidates, new_eval = analyze_position(st.session_state.board)
+
+            label, color, text = judge_move(
+                board_before,
+                move,
+                best_eval,
+                new_eval
+            )
+
+            st.session_state.feedback = {
+                "label": label,
+                "color": color,
+                "text": text
+            }
+            st.rerun()
+
+# ================= INFO ==================
+with col_info:
+    st.subheader("Move Feedback")
 
     if st.session_state.feedback:
-        verdict, explanation = st.session_state.feedback
+        f = st.session_state.feedback
+        st.markdown(
+            f"""
+            <div style="background:{f['color']};
+                        color:white;
+                        padding:12px;
+                        border-radius:8px;
+                        text-align:center;">
+                <h4>{f['label']}</h4>
+                <p>{f['text']}</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.info("Play a move to receive feedback.")
 
-        if verdict == "good":
-            st.success(f"✅ Excellent! {explanation}")
+    st.divider()
+    st.subheader("💡 Best Suggestion")
 
-        elif verdict == "ok":
-            st.warning(f"⚠️ {explanation}")
-
-        else:
-            st.error(f"❌ {explanation}")
-
-    st.subheader("📌 Why this works")
-    st.markdown("""
-- **Checks** are rewarded most (0.57)
-- **Captures** matter (0.17)
-- **Positional play** matters least at beginner level
-- Stockfish calculates
-- ML *re-ranks* moves for humans
-""")
-
-# ============================================================
-# END OF FILE
-# ============================================================
+    if candidates:
+        best = candidates[0]
+        st.metric("Eval", f"{best['raw']:+.2f}")
+        st.success(f"Best Move: {best['san']}")
+        st.caption(explain_good(st.session_state.board, best["move"]))
