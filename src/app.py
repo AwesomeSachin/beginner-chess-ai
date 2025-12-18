@@ -59,7 +59,7 @@ def explain_good_move(board_before, move):
     if new_threats:
         narrative.append(f"Attacks the {new_threats[0]}!")
 
-    # 4. STRATEGY (Your requested part!)
+    # 4. STRATEGY
     if not narrative:
         if board_before.fullmove_number < 15: # Opening Phase
             if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
@@ -69,7 +69,7 @@ def explain_good_move(board_before, move):
             elif board_before.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
                 narrative.append("Develops a piece to an active square.")
         
-        # Pawn Logic (ONLY applied here, never in bad moves)
+        # Pawn Logic (ONLY applied if move is mathematically good)
         if not narrative and board_before.piece_type_at(move.from_square) == chess.PAWN:
             narrative.append("Improves pawn structure and takes space.")
 
@@ -80,26 +80,26 @@ def explain_good_move(board_before, move):
 def explain_bad_move(board_before, played_move, best_move):
     """Explains WHAT WENT WRONG. Never compliments the move."""
     
-    # 1. DID YOU HANG A PIECE? (Self-Destruct)
+    # 1. HANGING PIECE / BLUNDER
     board_after = board_before.copy()
     board_after.push(played_move)
-    # If the piece we just moved is now under attack...
     if board_after.is_attacked_by(not board_after.turn, played_move.to_square):
-        return "Blunder. You moved your piece to a square where it can be captured."
+        # Only complain if we moved a valuable piece to death, or if it wasn't a trade
+        if not board_before.is_capture(played_move):
+            return "Blunder. You moved your piece to a square where it can be captured."
 
-    # 2. DID YOU IGNORE A THREAT? (The Hanging Knight Scenario)
-    # If a piece was under attack BEFORE, and we didn't move it, and we moved a pawn instead...
-    # This is a complex check, so we use a general catch-all for ignored threats:
-    
-    # 3. MISSED TACTICS
+    # 2. MISSED TACTICS
     if board_before.is_capture(best_move) and not board_before.is_capture(played_move):
         return "Missed a tactical capture opportunity (Material Loss)."
         
-    if board_after.is_checkmate(): # Did we get mated?
+    if board_after.is_checkmate():
         return "Game Over. You allowed checkmate."
 
-    # 4. GENERIC BAD FEEDBACK (No 'Pawn Structure' compliments here!)
-    return "Mistake. You likely ignored a threat or missed a better tactical opportunity."
+    # 3. PASSIVE PLAY (Catch-all for 'a3' type moves)
+    if board_before.piece_type_at(played_move.from_square) == chess.PAWN:
+        return "Passive pawn play. Neglects development and allows opponent initiative."
+
+    return "Passive play. Allows the opponent to take the initiative or improve their position."
 
 # --- LOGIC: ANALYSIS ---
 def get_analysis(board, engine_path):
@@ -112,12 +112,21 @@ def get_analysis(board, engine_path):
     info = engine.analyse(board, chess.engine.Limit(time=0.4), multipv=9)
     candidates = []
     
+    # 1. Identify the BEST move (Benchmark)
+    # info list is usually sorted by Score, so index 0 is best
+    if info:
+        best_score_raw = info[0]["score"].relative.score(mate_score=10000) or 0
+        best_move_obj = info[0]["pv"][0]
+    else:
+        best_score_raw = 0
+        best_move_obj = None
+
     for line in info:
         move = line["pv"][0]
         score = line["score"].relative.score(mate_score=10000)
         if score is None: score = 0
         
-        # --- ML WEIGHTS (From your Project) ---
+        # --- ML WEIGHTS ---
         w_check = 0.5792
         w_capture = 0.1724
         w_center = 0.0365
@@ -130,6 +139,16 @@ def get_analysis(board, engine_path):
         board.pop()
         
         final_score = (score/100) + bonus
+        
+        # --- SMART EXPLANATION SELECTOR ---
+        # Calculate how much worse this move is compared to the Engine Best
+        diff = (best_score_raw - score) / 100
+        
+        # If the move drops the eval by more than 0.5, it's BAD. Use bad explanation.
+        if diff > 0.5:
+            explanation_text = explain_bad_move(board, move, best_move_obj)
+        else:
+            explanation_text = explain_good_move(board, move)
 
         candidates.append({
             "move": move,
@@ -137,7 +156,7 @@ def get_analysis(board, engine_path):
             "eval": score/100,
             "score": final_score,
             "pv": line["pv"][:5],
-            "explanation": explain_good_move(board, move) # We always explain suggestions positively
+            "explanation": explanation_text
         })
     
     engine.quit()
@@ -148,22 +167,15 @@ def get_analysis(board, engine_path):
 def judge_move(current_eval, best_eval, board_before, played_move, best_move_obj):
     diff = best_eval - (-current_eval)
     
-    # STRICT DECISION TREE
-    # If the move is BAD, we force explain_bad_move.
-    # We DO NOT allow it to slip into explain_good_move.
-    
     if diff <= 0.2:
         return {"label": "✅ Excellent", "color": "green", "text": explain_good_move(board_before, played_move)}
     elif diff <= 0.7:
         return {"label": "🆗 Good", "color": "blue", "text": explain_good_move(board_before, played_move)}
     elif diff <= 1.5:
-        # Inaccuracy
         return {"label": "⚠️ Inaccuracy", "color": "orange", "text": explain_bad_move(board_before, played_move, best_move_obj)}
     elif diff <= 3.0:
-        # Mistake
         return {"label": "❌ Mistake", "color": "#FF5722", "text": explain_bad_move(board_before, played_move, best_move_obj)}
     else:
-        # Blunder
         return {"label": "😱 Blunder", "color": "red", "text": "Severe Error. You likely hung a piece or missed a forced mate."}
 
 # --- UI START ---
@@ -212,7 +224,6 @@ with col_main:
     if st.session_state.game_moves:
         c1, c2, c3 = st.columns([0.8, 2, 0.8])
         
-        # Sync Logic
         game_board_at_index = chess.Board()
         for i in range(st.session_state.move_index):
             game_board_at_index.push(st.session_state.game_moves[i])
@@ -240,7 +251,6 @@ with col_main:
         with c3:
             if on_track:
                 if st.button("Next ▶", use_container_width=True) and st.session_state.move_index < len(st.session_state.game_moves):
-                    # Data Capture
                     board_before = st.session_state.board.copy()
                     expected_eval = best_plan['eval'] if best_plan else 0
                     best_move_obj = best_plan['move'] if best_plan else None
