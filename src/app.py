@@ -28,161 +28,122 @@ def render_board(board, arrows=[]):
     b64 = base64.b64encode(board_svg.encode('utf-8')).decode("utf-8")
     return f'<img src="data:image/svg+xml;base64,{b64}" width="100%" style="display:block; margin-bottom:10px;" />'
 
-# --- NEW LOGIC: MATERIAL CALCULATOR ---
-def get_material_balance(board):
-    # Standard Piece Values
-    values = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
-    white_mat = sum(len(board.pieces(pt, chess.WHITE)) * val for pt, val in values.items())
-    black_mat = sum(len(board.pieces(pt, chess.BLACK)) * val for pt, val in values.items())
-    return white_mat, black_mat
+# --- HELPER: FORMAT MOVE SEQUENCE ---
+def format_line(board, move_list):
+    """Converts a list of move objects into a readable SAN string (e.g. 1. e4 e5 2. Nf3)"""
+    board_temp = board.copy()
+    san_list = []
+    for move in move_list:
+        san = board_temp.san(move)
+        san_list.append(san)
+        board_temp.push(move)
+    return " ➤ ".join(san_list)
 
-# --- NEW LOGIC: EXPLAINER ENGINE ---
-def get_deep_explanation(board_before, move, eval_diff, engine):
+# --- LOGIC: EXPLAINER ENGINE ---
+def get_deep_feedback(board_before, played_move, best_move_obj, best_line, engine):
     """
-    Rebuilt from scratch to focus on CONSEQUENCES (Material changes, Threats).
+    Generates feedback by comparing the PLAYED line vs the BEST line.
+    Returns dictionaries with 'text' and 'line' for display.
     """
     board_after = board_before.copy()
-    board_after.push(move)
+    board_after.push(played_move)
     
-    # 1. MATERIAL CHANGE CHECK (Did we lose/gain stuff?)
-    w_before, b_before = get_material_balance(board_before)
-    w_after, b_after = get_material_balance(board_after)
+    # 1. ANALYZE THE MOVE PLAYED (To see the Refutation)
+    # We ask engine: "What is the best reply for the opponent now?"
+    info_played = engine.analyse(board_after, chess.engine.Limit(time=0.4))
+    score_played = info_played["score"].relative.score(mate_score=10000) or 0
     
-    # Perspective: Did the mover improve their material?
-    if board_before.turn == chess.WHITE:
-        mat_diff = w_after - w_before
+    # Get the refutation line (Opponent's best response sequence)
+    refutation_moves = info_played.get("pv", [])[:4] # Top 4 moves of punishment
+    refutation_text = format_line(board_after, refutation_moves)
+
+    # 2. ANALYZE THE BEST MOVE (What we missed)
+    # We already passed this in as `best_line`
+    missed_text = format_line(board_before, best_line[:4])
+    
+    # 3. COMPARE SCORES TO JUDGE
+    # Re-calculate best score for comparison
+    board_best = board_before.copy()
+    if best_move_obj:
+        board_best.push(best_move_obj)
+        info_best = engine.analyse(board_best, chess.engine.Limit(time=0.1)) # Quick check
+        best_score = info_best["score"].relative.score(mate_score=10000) or 0
     else:
-        mat_diff = b_after - b_before
-
-    # 2. CHECK FOR BLUNDERS (Huge Eval Drop > 1.5)
-    if eval_diff > 1.5:
-        # Case A: We moved into a square where we get eaten (Hanging Piece)
-        if board_after.is_attacked_by(board_after.turn, move.to_square):
-             # If we didn't capture anything valuable, it's a pure blunder
-             if mat_diff <= 0:
-                 return "Blunder. You simply hung a piece for free."
+        best_score = 0
         
-        # Case B: We allowed a forced mate
-        if board_after.is_checkmate():
-            return "Catastrophe. You allowed immediate checkmate."
-            
-        # Case C: Ask Engine "Why is this so bad?" (The Refutation)
-        try:
-            info = engine.analyse(board_after, chess.engine.Limit(time=0.1))
-            opp_response = info["pv"][0]
-            opp_piece = board_after.piece_at(opp_response.from_square)
-            p_name = chess.piece_name(opp_piece.piece_type) if opp_piece else "piece"
-            return f"Blunder. Opponent can reply with {board_after.san(opp_response)} and win material."
-        except:
-            return "Severe Mistake. You missed a critical tactical threat."
-
-    # 3. CHECK FOR TACTICS (Good Moves)
-    if board_before.is_capture(move):
-        # Did we win material?
-        if mat_diff > 0:
-            return f"Winning Trade. You gained material (+{mat_diff})."
-        elif mat_diff == 0:
-             return "Trade. You exchanged pieces evenly."
-        else:
-             # Negative material difference on a capture = Bad Trade
-             if eval_diff > 0.5:
-                 return "Bad Trade. You gave up more value than you got."
-             else:
-                 return "Sacrifice? You gave up material for activity."
-
-    # 4. POSITIONAL LOGIC (If no tactics involved)
-    # Center Control
-    if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5, chess.C4, chess.C5, chess.F4, chess.F5]:
-        return "Central Control. Takes ownership of the most important squares."
+    diff = (best_score - score_played) / 100
     
-    # Development (Knights/Bishops)
-    piece_type = board_before.piece_type_at(move.from_square)
-    if piece_type in [chess.KNIGHT, chess.BISHOP]:
-        # Check if it moved forward
-        rank_before = chess.square_rank(move.from_square)
-        rank_after = chess.square_rank(move.to_square)
-        if (board_before.turn == chess.WHITE and rank_after > rank_before) or \
-           (board_before.turn == chess.BLACK and rank_after < rank_before):
-            return "Development. Brings a piece into the fight."
+    # 4. GENERATE CONTENT
+    if diff <= 0.2:
+        return {
+            "label": "✅ Excellent", 
+            "color": "green", 
+            "main_text": "Perfect play! You found the best continuation.",
+            "refutation": None,
+            "better_line": None
+        }
+    elif diff <= 0.6:
+        return {
+            "label": "🆗 Good", 
+            "color": "blue", 
+            "main_text": "Solid move. Maintains the position.",
+            "refutation": None,
+            "better_line": None
+        }
+    elif diff <= 1.5:
+        return {
+            "label": "⚠️ Inaccuracy", 
+            "color": "orange", 
+            "main_text": "Passive play. You gave the opponent a slight advantage.",
+            "refutation": f"Opponent can now play: **{refutation_text}**",
+            "better_line": f"Better plan was: **{missed_text}**"
+        }
+    else:
+        return {
+            "label": "❌ Mistake / Blunder", 
+            "color": "red", 
+            "main_text": "Critical Error. You missed a tactical threat.",
+            "refutation": f"Opponent punishes with: **{refutation_text}**",
+            "better_line": f"You should have played: **{missed_text}**"
+        }
 
-    # Safety
-    if board_before.is_castling(move):
-        return "King Safety. Castling protects the king and connects rooks."
-
-    # Passive Checks
-    if eval_diff > 0.3:
-        return "Inaccuracy. Passive play that gives the opponent time."
-
-    return "Solid move. Improves position slightly."
-
-# --- ANALYSIS LOOP ---
-def get_analysis(board, engine_path):
+# --- LOGIC: NEXT MOVE SUGGESTION ---
+def get_suggestions(board, engine_path):
     try:
         engine = chess.engine.SimpleEngine.popen_uci(engine_path)
     except:
-        return None, []
+        return []
     
-    # 1. Get Best Move First (The Benchmark)
-    best_info = engine.analyse(board, chess.engine.Limit(time=0.4))
-    best_score_val = best_info["score"].relative.score(mate_score=10000) or 0
-    best_move_san = board.san(best_info["pv"][0])
-
-    # 2. Get Top Candidates
-    info = engine.analyse(board, chess.engine.Limit(time=0.4), multipv=9)
-    candidates = []
+    # Get Top 3 Lines
+    info = engine.analyse(board, chess.engine.Limit(time=0.5), multipv=3)
+    suggestions = []
     
     for line in info:
         move = line["pv"][0]
         score = line["score"].relative.score(mate_score=10000)
-        if score is None: score = 0
         
-        # --- YOUR ML LOGIC (Still Valid!) ---
-        # We keep this to rank moves, but we use the NEW logic to explain them.
-        w_check = 0.5792
-        w_capture = 0.1724
-        w_center = 0.0365
+        # Create the full sequence string
+        sequence = format_line(board, line["pv"][:5])
         
-        bonus = 0
-        board.push(move)
-        if board.is_check(): bonus += w_check
-        if board.is_capture(move): bonus += w_capture
-        if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]: bonus += w_center
-        board.pop()
+        # Generate a brief reason based on the FIRST move only
+        # (Keeping it simple for the reason text, but showing full line)
+        reason = "Improves position."
+        if board.is_capture(move): reason = "Wins material or trades."
+        if board.is_check(): reason = "Forces the King to move."
         
-        final_score = (score/100) + bonus
-        
-        # Calculate Diff for Feedback
-        diff = (best_score_raw - score) / 100 if 'best_score_raw' in locals() else 0
-
-        # Generate Explanation using NEW ENGINE
-        explanation = get_deep_explanation(board, move, diff, engine)
-
-        # Determine Label
-        if diff <= 0.2:
-            label, color = "✅ Excellent", "green"
-        elif diff <= 0.6:
-            label, color = "🆗 Good", "blue"
-        elif diff <= 1.5:
-            label, color = "⚠️ Inaccuracy", "orange"
-        else:
-            label, color = "❌ Mistake", "red"
-
-        candidates.append({
+        suggestions.append({
             "move": move,
             "san": board.san(move),
-            "score": final_score,
-            "eval": score/100,
-            "label": label,
-            "color": color,
-            "explanation": explanation
+            "score": score/100 if score else 0,
+            "sequence": sequence,
+            "reason": reason
         })
-
+        
     engine.quit()
-    candidates.sort(key=lambda x: x['score'], reverse=True)
-    return candidates[0] if candidates else None, candidates
+    return suggestions
 
 # --- UI START ---
-st.title("♟️ Deep Logic Chess (Pro Logic)")
+st.title("♟️ Deep Logic Chess (Sequence Edition)")
 
 # SIDEBAR
 with st.sidebar:
@@ -209,16 +170,14 @@ with st.sidebar:
 # LAYOUT
 col_main, col_info = st.columns([1.5, 1.2])
 
-# AUTO-ANALYSIS
-with st.spinner("Analyzing position..."):
-    # We need to pass the current best score to the loop, so let's grab it inside get_analysis
-    # Note: To save time, we do it all in one function now.
-    best_plan, candidates = get_analysis(st.session_state.board, STOCKFISH_PATH)
+# AUTO-ANALYSIS (Get Suggestions for Current Board)
+with st.spinner("Calculating lines..."):
+    suggestions = get_suggestions(st.session_state.board, STOCKFISH_PATH)
 
 arrows = []
-if best_plan:
-    m1 = best_plan['move']
-    arrows.append(chess.svg.Arrow(m1.from_square, m1.to_square, color="#4CAF50"))
+if suggestions:
+    best_move = suggestions[0]['move']
+    arrows.append(chess.svg.Arrow(best_move.from_square, best_move.to_square, color="#4CAF50"))
 
 # === LEFT: BOARD ===
 with col_main:
@@ -264,39 +223,23 @@ with col_main:
                     st.session_state.board.push(move)
                     st.session_state.move_index += 1
                     
-                    # ANALYZE AFTER
-                    # To judge the move, we compare it to what Stockfish WOULD have done
-                    temp_engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
-                    
-                    # 1. What was the eval of the BEST move available?
-                    best_info = temp_engine.analyse(board_before, chess.engine.Limit(time=0.1))
-                    best_eval = best_info["score"].relative.score(mate_score=10000) or 0
-                    
-                    # 2. What is the eval of the move WE PLAYED?
-                    # We have to force analyze the specific move
-                    board_test = board_before.copy()
-                    board_test.push(move)
-                    curr_info = temp_engine.analyse(board_test, chess.engine.Limit(time=0.1))
-                    # Note: The eval of board_after is from opponent perspective, so we negate
-                    curr_eval = -curr_info["score"].relative.score(mate_score=10000) or 0
-                    
-                    diff = (best_eval - curr_eval) / 100
-                    
-                    # GET EXPLANATION
-                    expl = get_deep_explanation(board_before, move, diff, temp_engine)
-                    
-                    # SET FEEDBACK
-                    if diff <= 0.2:
-                        lbl, clr = "✅ Excellent", "green"
-                    elif diff <= 0.6:
-                        lbl, clr = "🆗 Good", "blue"
-                    elif diff <= 1.5:
-                        lbl, clr = "⚠️ Inaccuracy", "orange"
-                    else:
-                        lbl, clr = "❌ Mistake", "red"
+                    # RUN ANALYSIS FOR FEEDBACK
+                    # We need to know what the BEST line was before we moved
+                    # (We use the 'suggestions' variable we calculated at the top of the script)
+                    if suggestions:
+                        best_move_obj = suggestions[0]['move']
+                        # We need the full pv line object, which isn't stored in simple dict
+                        # So we do a quick re-fetch or pass it. 
+                        # To be precise, let's spin up a quick engine check for the 'Best Line' object
+                        temp_engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+                        best_info = temp_engine.analyse(board_before, chess.engine.Limit(time=0.1))
+                        best_line = best_info.get("pv", [])
                         
-                    st.session_state.feedback_data = {"label": lbl, "color": clr, "text": expl}
-                    temp_engine.quit()
+                        # GENERATE FEEDBACK
+                        fb = get_deep_feedback(board_before, move, best_move_obj, best_line, temp_engine)
+                        st.session_state.feedback_data = fb
+                        temp_engine.quit()
+                    
                     st.rerun()
             else:
                 if st.button("Sync ⏩", use_container_width=True):
@@ -311,46 +254,46 @@ with col_main:
 # === RIGHT: FEEDBACK PANEL ===
 with col_info:
     
-    # 1. FEEDBACK BANNER (Instant Feedback on Last Move)
+    # 1. FEEDBACK BANNER (THE NEW DESIGN)
     if st.session_state.feedback_data:
         data = st.session_state.feedback_data
+        
+        # Color Logic
+        bg_color = "#f0f2f6"
+        if data['color'] == "green": bg_color = "#d4edda"
+        if data['color'] == "orange": bg_color = "#fff3cd"
+        if data['color'] == "red": bg_color = "#f8d7da"
+        
         st.markdown(f"""
-        <div style="background-color: {data['color']}; color: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-            <h3 style="margin:0; text-align: center;">{data['label']}</h3>
-            <p style="margin:0; text-align: center; font-size: 16px; margin-top:8px; font-weight: 500;">{data['text']}</p>
+        <div style="background-color: {bg_color}; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 5px solid {data['color']};">
+            <h3 style="margin:0; color: #333;">{data['label']}</h3>
+            <p style="font-size: 16px; margin-bottom: 0;">{data['main_text']}</p>
         </div>
         """, unsafe_allow_html=True)
+
+        # SHOW SEQUENCES IF BAD
+        if data['refutation']:
+            st.warning("🔻 Why it's bad (Opponent's Threat):")
+            st.markdown(f"_{data['refutation']}_")
+            
+        if data['better_line']:
+            st.success("💡 What you should have played:")
+            st.markdown(f"_{data['better_line']}_")
+
     else:
         st.info("Make a move to see the deep analysis.")
 
-    # 2. SUGGESTION
-    st.subheader("💡 Best Plan")
-    if best_plan:
-        c_eval, c_move = st.columns([1, 2])
-        c_eval.metric("Eval", f"{best_plan['eval']:+.2f}")
-        c_move.success(f"**Recommends:** {best_plan['san']}")
-        st.caption(f"Logic: {best_plan['explanation']}")
-
     st.divider()
 
-    # 3. ALTERNATIVES
-    st.subheader("Other Options")
-    if candidates:
-        cols = st.columns(3)
-        for i, cand in enumerate(candidates[:9]): 
-            col = cols[i % 3]
-            with col:
-                if st.button(f"{cand['san']}", key=f"move_{i}", use_container_width=True):
-                    st.session_state.board.push(cand['move'])
-                    st.session_state.feedback_data = {
-                        "label": cand['label'], 
-                        "color": cand['color'], 
-                        "text": cand['explanation']
-                    }
+    # 2. SUGGESTIONS (Top 3 Lines)
+    st.subheader("🔮 Engine Suggestions")
+    
+    if suggestions:
+        for i, line in enumerate(suggestions):
+            with st.expander(f"{i+1}. **{line['san']}** ({line['score']:+.2f})", expanded=(i==0)):
+                st.write(f"**Continuation:** {line['sequence']}")
+                st.caption(f"Reason: {line['reason']}")
+                if st.button(f"Play {line['san']}", key=f"sugg_{i}"):
+                    st.session_state.board.push(line['move'])
+                    st.session_state.feedback_data = None # Reset feedback since it's an engine move
                     st.rerun()
-                
-                st.markdown(f"""
-                <div style='text-align:center; font-size:12px; margin-top:-10px; margin-bottom:10px;'>
-                    <span style='color:{cand['color']}; font-weight:bold;'>{cand['label'].split(' ')[1]}</span>
-                </div>
-                """, unsafe_allow_html=True)
