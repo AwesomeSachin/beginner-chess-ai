@@ -29,9 +29,9 @@ def render_board(board, arrows=[]):
     b64 = base64.b64encode(board_svg.encode('utf-8')).decode("utf-8")
     return f'<img src="data:image/svg+xml;base64,{b64}" width="100%" style="display:block; margin-bottom:10px;" />'
 
-# --- LOGIC: POSITIVE EXPLANATION (For Good Moves) ---
+# --- LOGIC: POSITIVE EXPLANATION (For Suggesting Moves) ---
 def explain_good_move(board_before, move):
-    """Explains WHY a good move is good."""
+    """Explains WHY a suggested move is good (for engine suggestions only)."""
     board_after = board_before.copy()
     board_after.push(move)
     
@@ -71,29 +71,144 @@ def explain_good_move(board_before, move):
     
     return "A solid positional improvement."
 
-# --- LOGIC: NEGATIVE EXPLANATION (For Bad Moves) ---
-def explain_bad_move(board_before, played_move, best_move):
-    """Explains WHAT WAS MISSED when a bad move is played."""
+# --- LOGIC: EXPLAINING CURRENT MOVE QUALITY ---
+def explain_move_quality(board_before, played_move, best_move, eval_diff):
+    """
+    Explains the quality of the CURRENT move based on what was missed 
+    and the consequences. This is for judging moves that were actually played.
+    """
     
-    # 1. Missed capture
-    if board_before.is_capture(best_move) and not board_before.is_capture(played_move):
-        victim = board_before.piece_at(best_move.to_square)
-        if victim:
-            return f"Missed capturing the {chess.piece_name(victim.piece_type)} (Material Loss)."
-        return "Missed a tactical capture opportunity."
+    # EXCELLENT / GOOD moves (diff <= 0.7)
+    if eval_diff <= 0.7:
+        # The move is good, explain why
+        board_after = board_before.copy()
+        board_after.push(played_move)
+        
+        # Check for tactical wins
+        if board_before.is_capture(played_move):
+            victim = board_before.piece_at(played_move.to_square)
+            if victim:
+                return f"Excellent! Captures the {chess.piece_name(victim.piece_type)} gaining material."
+            return "Good! Recaptures material maintaining balance."
+        
+        # Check for defensive moves
+        if board_before.is_attacked_by(not board_before.turn, played_move.from_square):
+            return "Well played! Moves the piece to safety, avoiding material loss."
+        
+        # Check for creating threats
+        for sq in board_after.attacks(played_move.to_square):
+            target = board_after.piece_at(sq)
+            if target and target.color != board_before.turn:
+                if target.piece_type == chess.QUEEN:
+                    return "Strong move! Attacks the opponent's Queen."
+                elif target.piece_type == chess.ROOK:
+                    return "Good pressure! Attacks the opponent's Rook."
+        
+        # Strategic moves
+        if board_before.fullmove_number < 12:
+            if played_move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
+                return "Solid! Controls the center, a key opening principle."
+            elif board_before.is_castling(played_move):
+                return "Excellent! King is now safe behind pawns."
+        
+        return "Good move! Improves your position with no significant drawbacks."
     
-    # 2. Missed checkmate
-    board_temp = board_before.copy()
-    board_temp.push(best_move)
-    if board_temp.is_checkmate():
-        return "Missed a forced checkmate sequence!"
+    # INACCURACY (0.7 < diff <= 1.5)
+    elif eval_diff <= 1.5:
+        reasons = []
+        
+        # Did we miss a capture?
+        if board_before.is_capture(best_move) and not board_before.is_capture(played_move):
+            victim = board_before.piece_at(best_move.to_square)
+            if victim:
+                reasons.append(f"missed capturing the {chess.piece_name(victim.piece_type)}")
+        
+        # Did we miss giving check?
+        if board_before.gives_check(best_move) and not board_before.gives_check(played_move):
+            reasons.append("missed a checking move that would pressure the opponent")
+        
+        # Did we leave a piece hanging?
+        board_after = board_before.copy()
+        board_after.push(played_move)
+        moved_piece_square = played_move.to_square
+        if board_after.is_attacked_by(not board_before.turn, moved_piece_square):
+            # Check if it's defended
+            if not board_after.is_attacked_by(board_before.turn, moved_piece_square):
+                piece = board_after.piece_at(moved_piece_square)
+                if piece:
+                    reasons.append(f"leaves your {chess.piece_name(piece.piece_type)} undefended and vulnerable")
+        
+        if reasons:
+            return f"Inaccuracy. You {reasons[0]}. This gives opponent an advantage."
+        return "Inaccurate. A better move was available that would improve your position more."
     
-    # 3. Missed check
-    if board_before.gives_check(best_move) and not board_before.gives_check(played_move):
-        return "Missed a powerful checking move."
+    # MISTAKE (1.5 < diff <= 3.0)
+    elif eval_diff <= 3.0:
+        reasons = []
+        
+        # Check for missed tactics
+        if board_before.is_capture(best_move):
+            victim = board_before.piece_at(best_move.to_square)
+            if victim:
+                reasons.append(f"Mistake! You missed winning the {chess.piece_name(victim.piece_type)}")
+        
+        # Check for missed checkmate
+        board_temp = board_before.copy()
+        board_temp.push(best_move)
+        if board_temp.is_checkmate():
+            return "Critical Mistake! You missed an immediate checkmate opportunity."
+        
+        # Check if we hung a piece
+        board_after = board_before.copy()
+        board_after.push(played_move)
+        moved_piece_square = played_move.to_square
+        if board_after.is_attacked_by(not board_before.turn, moved_piece_square):
+            if not board_after.is_attacked_by(board_before.turn, moved_piece_square):
+                piece = board_after.piece_at(moved_piece_square)
+                if piece and piece.piece_type != chess.PAWN:
+                    return f"Mistake! This move hangs your {chess.piece_name(piece.piece_type)} - opponent can capture it for free."
+        
+        if reasons:
+            return f"{reasons[0]}. Opponent now has a clear advantage."
+        
+        return "Mistake! This move significantly weakens your position and gives opponent the upper hand."
     
-    # 4. Passive play
-    return "Passive play. Allows the opponent to take the initiative."
+    # BLUNDER (diff > 3.0)
+    else:
+        # Check for missed checkmate first
+        board_temp = board_before.copy()
+        board_temp.push(best_move)
+        if board_temp.is_checkmate():
+            return "BLUNDER! You had checkmate in one move but played something else. Game-losing mistake."
+        
+        # Check if we hung a major piece
+        board_after = board_before.copy()
+        board_after.push(played_move)
+        moved_piece_square = played_move.to_square
+        if board_after.is_attacked_by(not board_before.turn, moved_piece_square):
+            if not board_after.is_attacked_by(board_before.turn, moved_piece_square):
+                piece = board_after.piece_at(moved_piece_square)
+                if piece:
+                    if piece.piece_type == chess.QUEEN:
+                        return "BLUNDER! You hung your Queen! This loses the game."
+                    elif piece.piece_type == chess.ROOK:
+                        return "BLUNDER! You hung your Rook for free. This is likely game-losing."
+                    else:
+                        return f"BLUNDER! This hangs your {chess.piece_name(piece.piece_type)} and throws away the game."
+        
+        # Check if opponent can now mate us
+        board_after = board_before.copy()
+        board_after.push(played_move)
+        if board_after.is_check():
+            return "BLUNDER! This move walks into check or allows a devastating attack. Game is likely lost."
+        
+        # Check for missed winning material
+        if board_before.is_capture(best_move):
+            victim = board_before.piece_at(best_move.to_square)
+            if victim and victim.piece_type in [chess.QUEEN, chess.ROOK]:
+                return f"BLUNDER! You missed winning the opponent's {chess.piece_name(victim.piece_type)}. Game-changing mistake."
+        
+        return "BLUNDER! Catastrophic mistake that likely loses the game. Opponent now has overwhelming advantage."
 
 # --- LOGIC: ML-WEIGHTED ANALYSIS ---
 def get_analysis(board, engine_path):
@@ -155,24 +270,22 @@ def judge_move(current_eval, best_eval, board_before, played_move, best_move_obj
     """Judges the quality of a move and provides context-aware feedback."""
     diff = best_eval - current_eval
     
-    # DECISION TREE FOR FEEDBACK
+    # Get the proper explanation based on move quality
+    explanation = explain_move_quality(board_before, played_move, best_move_obj, diff)
+    
+    # DECISION TREE FOR FEEDBACK LABEL
     if diff <= 0.2:
         label, color = "✅ Excellent", "green"
-        text = explain_good_move(board_before, played_move)
     elif diff <= 0.7:
         label, color = "🆗 Good", "blue"
-        text = explain_good_move(board_before, played_move)
     elif diff <= 1.5:
         label, color = "⚠️ Inaccuracy", "orange"
-        text = explain_bad_move(board_before, played_move, best_move_obj)
     elif diff <= 3.0:
         label, color = "❌ Mistake", "#FF5722"
-        text = explain_bad_move(board_before, played_move, best_move_obj)
     else:
         label, color = "😱 Blunder", "red"
-        text = explain_bad_move(board_before, played_move, best_move_obj)
     
-    return {"label": label, "color": color, "text": text}
+    return {"label": label, "color": color, "text": explanation}
 
 # --- UI START ---
 st.title("♟️ Deep Logic Chess (ML Edition)")
