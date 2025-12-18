@@ -1,614 +1,470 @@
-import streamlit as st
-import chess
-import chess.engine
-import chess.svg
-import chess.pgn
+# app.py
+"""
+Deep Logic Chess (XAI Edition) - Streamlit app
+
+Features:
+- Uses Stockfish engine (via UCI) to get top moves.
+- Applies ML "weights" learned offline (checks/captures/center) to re-rank Stockfish suggestions,
+  making moves that are more "beginner-friendly" score higher.
+- Produces natural-language feedback for played moves (green/orange/red banners).
+- Renders chessboard as SVG and keeps session state.
+
+Prerequisites:
+- Stockfish binary accessible (default path: /usr/bin/stockfish).
+  Set env var STOCKFISH_PATH to override.
+- Python packages: streamlit, chess (python-chess)
+"""
+
+import os
+import sys
 import io
 import base64
+import textwrap
+from dataclasses import dataclass
+from typing import List, Dict, Any, Tuple
 
-# --- CONFIG ---
-st.set_page_config(page_title="Deep Logic Chess - XAI Edition", layout="wide")
-STOCKFISH_PATH = "/usr/games/stockfish"
+import streamlit as st
+import chess
+import chess.svg
+import chess.engine
 
-# --- ML WEIGHTS FROM COLAB TRAINING ---
-# These weights were learned from 20,000 beginner games (<1500 Elo)
-# They represent the TRUE importance of each concept for beginner success
+# -----------------------
+# Hardcoded ML Weights (from your Colab "Brain")
+# -----------------------
 ML_WEIGHTS = {
-    'check': 0.5792,      # Checks are CRITICAL for beginners (highest weight)
-    'capture': 0.1724,    # Captures matter, but less than checks
-    'center': 0.0365      # Center control barely matters at beginner level
+    "checks": 0.5792,
+    "captures": 0.1724,
+    "center": 0.0365
 }
 
-# --- SESSION STATE (APP'S MEMORY) ---
-if 'board' not in st.session_state:
-    st.session_state.board = chess.Board()
-if 'game_moves' not in st.session_state:
-    st.session_state.game_moves = []
-if 'move_index' not in st.session_state:
-    st.session_state.move_index = 0
-if 'last_best_eval' not in st.session_state:
-    st.session_state.last_best_eval = 0.35
-if 'feedback_data' not in st.session_state:
-    st.session_state.feedback_data = None
-if 'move_history' not in st.session_state:
-    st.session_state.move_history = []
+# Center squares (classical central 4)
+CENTER_SQUARES = {chess.E4, chess.D4, chess.E5, chess.D5}
 
-# --- HELPER: RENDER BOARD ---
-def render_board(board, arrows=[]):
-    """Convert chess board to displayable SVG image"""
-    board_svg = chess.svg.board(
-        board=board,
-        size=550,
-        arrows=arrows,
-        lastmove=board.peek() if board.move_stack else None,
-        colors={'square light': '#f0d9b5', 'square dark': '#b58863'}
-    )
-    b64 = base64.b64encode(board_svg.encode('utf-8')).decode("utf-8")
-    return f'<img src="data:image/svg+xml;base64,{b64}" width="100%" style="display:block; margin-bottom:10px;" />'
+# Stockfish path (override with env var if needed)
+STOCKFISH_PATH = os.environ.get("STOCKFISH_PATH", "/usr/bin/stockfish")
 
-# --- ML-ENHANCED MOVE SCORING ---
-def calculate_ml_bonus(board, move):
-    """
-    Apply ML insights to boost moves that matter for beginners.
-    This is where Colab's intelligence gets applied!
-    """
-    bonus = 0.0
-    
-    # Check Bonus (Most Important for Beginners)
-    if board.gives_check(move):
-        bonus += ML_WEIGHTS['check']
-    
-    # Capture Bonus (Second Most Important)
-    if board.is_capture(move):
-        bonus += ML_WEIGHTS['capture']
-    
-    # Center Control Bonus (Least Important at This Level)
-    if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
-        bonus += ML_WEIGHTS['center']
-    
-    return bonus
 
-# --- POSITIVE EXPLANATION ENGINE ---
-def explain_good_move(board_before, move):
-    """
-    Generate human-readable explanation for WHY a move is good.
-    Uses chess logic + natural language templates.
-    """
-    narrative = []
-    board_after = board_before.copy()
-    board_after.push(move)
-    
-    # 1. TACTICAL: Captures (Material Gain)
-    if board_before.is_capture(move):
-        victim = board_before.piece_at(move.to_square)
-        if victim:
-            piece_names = {
-                chess.PAWN: "pawn",
-                chess.KNIGHT: "knight",
-                chess.BISHOP: "bishop",
-                chess.ROOK: "rook",
-                chess.QUEEN: "queen"
-            }
-            piece_name = piece_names.get(victim.piece_type, "piece")
-            narrative.append(f"✓ Captures the {piece_name} (Material Gain)")
-    
-    # 2. TACTICAL: Checks (King Pressure)
-    if board_before.gives_check(move):
-        narrative.append("✓ Checks the enemy king (Forces opponent's response)")
-    
-    # 3. DEFENSIVE: Escaping Threats
-    was_attacked = board_before.is_attacked_by(
-        not board_before.turn, 
-        move.from_square
-    )
-    if was_attacked:
-        narrative.append("✓ Escapes a threat (Saves the piece)")
-    
-    # 4. TACTICAL: Creating Threats
-    new_threats = []
-    for sq in board_after.attacks(move.to_square):
-        target = board_after.piece_at(sq)
-        if target and target.color != board_before.turn:
-            if target.piece_type == chess.QUEEN:
-                new_threats.append("Queen")
-            elif target.piece_type == chess.ROOK:
-                new_threats.append("Rook")
-    if new_threats:
-        narrative.append(f"✓ Attacks the {new_threats[0]}!")
-    
-    # 5. STRATEGIC: Opening/Development
-    if not narrative and board_before.fullmove_number < 12:
-        if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
-            narrative.append("✓ Fights for the center")
-        elif board_before.is_castling(move):
-            narrative.append("✓ Castles for king safety")
-        elif board_before.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
-            narrative.append("✓ Develops a piece to an active square")
-    
-    # 6. FALLBACK: Generic Positive
-    if not narrative:
-        if board_before.piece_type_at(move.from_square) == chess.PAWN:
-            narrative.append("✓ Improves pawn structure and takes space")
-        else:
-            narrative.append("✓ Solid positional improvement")
-    
-    return " ".join(narrative)
+# -----------------------
+# Utility functions
+# -----------------------
+def svg_board_to_html(svg_text: str, width: int = 420) -> str:
+    """Return embeddable HTML for chessboard SVG."""
+    # Ensure proper xml header for embedding
+    svg_bytes = svg_text.encode("utf-8")
+    b64 = base64.b64encode(svg_bytes).decode("utf-8")
+    html = f'<img src="data:image/svg+xml;base64,{b64}" width="{width}"/>'
+    return html
 
-# --- NEGATIVE EXPLANATION ENGINE ---
-def explain_bad_move(board_before, played_move, best_move, eval_drop):
+
+def cp_to_score(cp_or_mate: chess.engine.PovScore) -> float:
     """
-    Generate human-readable criticism for WHY a move is bad.
-    Uses evaluation drop + missed opportunities.
+    Convert engine score (pov score dict) into pawn units.
+    If a mate is reported, return a large value with sign for preference.
     """
-    
-    # 1. CRITICAL: Did we miss a forced checkmate?
-    board_temp = board_before.copy()
-    board_temp.push(best_move)
-    if board_temp.is_checkmate():
-        return "✗ CRITICAL: Missed a forced checkmate sequence!"
-    
-    # 2. SEVERE: Did we miss a free capture?
-    if board_before.is_capture(best_move) and not board_before.is_capture(played_move):
-        victim = board_before.piece_at(best_move.to_square)
-        if victim:
-            piece_names = {
-                chess.PAWN: "pawn",
-                chess.KNIGHT: "knight",
-                chess.BISHOP: "bishop",
-                chess.ROOK: "rook",
-                chess.QUEEN: "queen"
-            }
-            piece_name = piece_names.get(victim.piece_type, "piece")
-            return f"✗ Missed a free {piece_name} capture (Material Loss)"
-    
-    # 3. EVALUATION-BASED FEEDBACK
-    if eval_drop > 2.5:
-        # Check if we hung a piece
-        board_after = board_before.copy()
-        board_after.push(played_move)
-        moved_piece_square = played_move.to_square
-        
-        if board_after.is_attacked_by(not board_before.turn, moved_piece_square):
-            defenders = len(list(board_after.attackers(board_before.turn, moved_piece_square)))
-            attackers = len(list(board_after.attackers(not board_before.turn, moved_piece_square)))
-            if attackers > defenders:
-                return "✗ BLUNDER: Hung a piece (Undefended piece left under attack)"
-        
-        return "✗ Severe tactical error (Large evaluation swing against you)"
-    
-    elif eval_drop > 1.0:
-        return "✗ Allows opponent a strong tactical blow (Missed better defense)"
-    
+    if cp_or_mate is None:
+        return 0.0
+    if cp_or_mate.is_mate():
+        mate_in = cp_or_mate.mate()
+        # Represent mate as a large score; sign indicates side
+        # Positive for mate for side to move, negative for being mated.
+        return 1000.0 if mate_in > 0 else -1000.0
     else:
-        # Passive/Strategic error
-        if board_before.gives_check(best_move) and not board_before.gives_check(played_move):
-            return "✗ Passive play: Missed an opportunity to pressure the king"
-        else:
-            return "✗ Inaccurate: Allows opponent to improve position"
+        # cp is centipawns
+        return cp_or_mate.score() / 100.0
 
-# --- CORE ANALYSIS ENGINE ---
-def get_analysis(board, engine_path):
+
+def board_score_from_engine(board: chess.Board, info: Dict[str, Any]) -> float:
+    """Extract score from engine analyse info dict and convert to pawn units from White POV."""
+    # 'score' key contains a PovScore (score relative to the side to move?)
+    # Python-chess returns a PovScore from White POV if using engine.analyse on board.
+    pov = info.get("score", None)
+    if pov is None:
+        return 0.0
+    return cp_to_score(pov)
+
+
+# -----------------------
+# ML-augmented evaluation & explanation
+# -----------------------
+@dataclass
+class CandidateMove:
+    move: chess.Move
+    san: str
+    stockfish_score: float  # pawns from White POV
+    ml_bonus: float
+    combined_score: float  # score adjusted to be perspective-correct for side-to-move
+    is_check: bool
+    is_capture: bool
+    center_control: bool
+
+
+def extract_features_after_move(board: chess.Board, move: chess.Move) -> Tuple[bool, bool, bool]:
     """
-    Combines Stockfish's raw calculation with ML-enhanced scoring.
-    This is where the 'Deep Logic' happens!
+    Given a board and a move, return (is_check, is_capture, center_control) *after* the move is applied.
+    center_control: True if destination is in center or the moving side attacks any center square afterwards.
+    """
+    b2 = board.copy()
+    b2.push(move)
+    is_check = b2.is_check()
+    is_capture = board.is_capture(move)
+    # center_control if move lands on central square OR the moving side attacks any of the center squares after the move
+    dest = move.to_square
+    center_control = (dest in CENTER_SQUARES) or any(
+        b2.is_attacked_by(b2.turn, sq) for sq in CENTER_SQUARES
+    )
+    return is_check, is_capture, center_control
+
+
+def get_engine_candidates(engine: chess.engine.SimpleEngine, board: chess.Board, multipv: int = 9, depth: int = 16) -> List[Dict[str, Any]]:
+    """
+    Ask engine for multipv analysis (top N moves). Returns list of info dicts.
+    If engine doesn't support multipv or fails, tries fallback to single best move.
     """
     try:
-        engine = chess.engine.SimpleEngine.popen_uci(engine_path)
-    except Exception as e:
-        st.error(f"Stockfish engine error: {e}")
-        return None, []
-    
-    # Get Stockfish's top 9 move suggestions
-    info = engine.analyse(board, chess.engine.Limit(time=0.4), multipv=9)
-    candidates = []
-    
-    for line in info:
-        move = line["pv"][0]
-        
-        # Get base Stockfish evaluation
-        stockfish_score = line["score"].relative.score(mate_score=10000)
-        if stockfish_score is None:
-            stockfish_score = 0
-        base_eval = stockfish_score / 100
-        
-        # Apply ML bonus (This is the key innovation!)
-        ml_bonus = calculate_ml_bonus(board, move)
-        adjusted_eval = base_eval + ml_bonus
-        
-        # Generate natural language explanation
-        candidates.append({
-            "move": move,
-            "san": board.san(move),
-            "base_eval": base_eval,
-            "ml_bonus": ml_bonus,
-            "eval": adjusted_eval,  # Final score after ML adjustment
-            "pv": line["pv"][:5],
-            "explanation": explain_good_move(board, move)
-        })
-    
-    # Re-sort candidates by ML-adjusted evaluation
-    candidates.sort(key=lambda x: x["eval"], reverse=True)
-    
-    engine.quit()
-    return candidates[0] if candidates else None, candidates
+        # For engines that support multipv, this returns a list of dicts
+        info_list = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=multipv)
+        # python-chess returns a list for multipv; if single dict returned, wrap it
+        if isinstance(info_list, dict):
+            return [info_list]
+        return info_list
+    except Exception:
+        # Fallback: ask for single best move
+        try:
+            info = engine.analyse(board, chess.engine.Limit(depth=depth))
+            return [info]
+        except Exception:
+            return []
 
-# --- MOVE JUDGMENT SYSTEM ---
-def judge_move(current_eval, best_eval, board_before, played_move, best_move_obj):
+
+def get_analysis(engine: chess.engine.SimpleEngine, board: chess.Board, multipv: int = 9, depth: int = 16) -> List[CandidateMove]:
     """
-    Determines move quality and generates feedback.
-    Uses evaluation drop thresholds calibrated for beginners.
+    Main logic: get top engine moves, compute features, compute ML bonus, and produce combined scores.
+    Returns CandidateMove list sorted by combined_score descending (best for the side to move first).
     """
-    # Calculate how much worse the played move is vs. best move
-    eval_drop = best_eval - (-current_eval)  # Note: flip current eval for opponent's perspective
-    
-    # Thresholds calibrated for beginner play
-    if eval_drop <= 0.2:
-        label, color = "✅ Excellent", "green"
-        text = explain_good_move(board_before, played_move)
-    
-    elif eval_drop <= 0.5:
-        label, color = "🆗 Good", "blue"
-        text = explain_good_move(board_before, played_move)
-    
-    elif eval_drop <= 1.0:
-        label, color = "⚠️ Inaccuracy", "orange"
-        text = explain_bad_move(board_before, played_move, best_move_obj, eval_drop)
-    
-    elif eval_drop <= 2.5:
-        label, color = "❌ Mistake", "#FF5722"
-        text = explain_bad_move(board_before, played_move, best_move_obj, eval_drop)
-    
+    infos = get_engine_candidates(engine, board, multipv=multipv, depth=depth)
+    candidates: List[CandidateMove] = []
+
+    # We need the engine's score for each candidate. For multipv results, python-chess provides 'pv' and 'score'
+    for info in infos:
+        pv = info.get("pv", None)
+        if not pv:
+            continue
+        move = pv[0]
+        san = board.san(move)
+        sf_score = board_score_from_engine(board, info)  # pawns from White POV
+
+        # Extract features after applying move
+        is_check, is_capture, center_control = extract_features_after_move(board, move)
+
+        # ML bonus: sum(weights * feature)
+        ml_bonus = (ML_WEIGHTS["checks"] * float(is_check)
+                    + ML_WEIGHTS["captures"] * float(is_capture)
+                    + ML_WEIGHTS["center"] * float(center_control))
+
+        # Convert stockfish score to "from side-to-move perspective"
+        # Engine score is in White POV; for consistency, we compute side_to_move_multiplier
+        multiplier = 1.0 if board.turn == chess.WHITE else -1.0
+        combined_score = multiplier * sf_score + ml_bonus  # positive is better for side to move
+
+        candidate = CandidateMove(
+            move=move,
+            san=san,
+            stockfish_score=sf_score,
+            ml_bonus=ml_bonus,
+            combined_score=combined_score,
+            is_check=is_check,
+            is_capture=is_capture,
+            center_control=center_control
+        )
+        candidates.append(candidate)
+
+    # Sort by combined_score descending (best for side to move first)
+    candidates.sort(key=lambda c: c.combined_score, reverse=True)
+    return candidates
+
+
+# -----------------------
+# Explanation generation
+# -----------------------
+def explain_good_move(candidate: CandidateMove) -> str:
+    """Generate human-like positive feedback for a good move."""
+    parts = []
+    if candidate.is_capture:
+        parts.append("Captures material.")
+    if candidate.is_check:
+        parts.append("Gives check.")
+    if candidate.center_control:
+        parts.append("Improves control of the center.")
+    if not parts:
+        parts.append("Quiet developing move — helps your position.")
+    ml_line = f"(ML boost: +{candidate.ml_bonus:.3f})"
+    sf_line = f"(Stockfish eval: {candidate.stockfish_score:+.2f} pawns from White POV)"
+    return " ".join(parts) + " " + ml_line + " " + sf_line
+
+
+def explain_bad_move(eval_drop_pawns: float) -> str:
+    """
+    Generate criticism message for a move that drops evaluation by eval_drop_pawns (pawns).
+    - >1.0 pawn => Blunder
+    - 0.5 - 1.0 => Mistake
+    - 0.15 - 0.5 => Inaccuracy / Passive
+    - <0.15 => Fine
+    """
+    if eval_drop_pawns > 1.0:
+        return f"Blunder! The move loses more than {eval_drop_pawns:.2f} pawns of advantage."
+    elif eval_drop_pawns > 0.5:
+        return f"Mistake — it drops the evaluation by {eval_drop_pawns:.2f} pawns."
+    elif eval_drop_pawns > 0.15:
+        return f"Questionable / passive: evaluation drops by {eval_drop_pawns:.2f} pawns."
     else:
-        label, color = "😱 Blunder", "red"
-        text = explain_bad_move(board_before, played_move, best_move_obj, eval_drop)
-    
-    return {
-        "label": label,
-        "color": color,
-        "text": text,
-        "eval_drop": eval_drop
+        return f"Small inaccuracy — evaluation change is {eval_drop_pawns:.2f} pawns (acceptable)."
+
+
+# -----------------------
+# Session state initialization helpers
+# -----------------------
+def init_session_state():
+    if "board" not in st.session_state:
+        st.session_state.board = chess.Board()
+    if "history" not in st.session_state:
+        st.session_state.history = []
+    if "last_feedback" not in st.session_state:
+        st.session_state.last_feedback = None
+    if "weights" not in st.session_state:
+        st.session_state.weights = ML_WEIGHTS.copy()
+
+
+# -----------------------
+# UI Helpers
+# -----------------------
+def render_board_ui(board: chess.Board):
+    """Render the board SVG into the Streamlit page using components.html"""
+    svg = chess.svg.board(board=board, size=420)
+    html = svg_board_to_html(svg, width=420)
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def colored_banner(message: str, color: str = "green"):
+    """
+    Show a colored message banner. color: 'green', 'orange', 'red', or 'blue'
+    """
+    color_map = {
+        "green": "#d4f8d4",
+        "orange": "#fff4d6",
+        "red": "#ffd6d6",
+        "blue": "#d6eaff"
     }
+    bg = color_map.get(color, "#d6eaff")
+    st.markdown(f'<div style="background:{bg}; padding:12px; border-radius:6px;">{message}</div>', unsafe_allow_html=True)
 
-# ========================================
-# UI START
-# ========================================
 
-st.title("♟️ Deep Logic Chess - XAI Edition")
-st.caption("AI Chess Tutor powered by Machine Learning insights from 20,000 beginner games")
+# -----------------------
+# App main
+# -----------------------
+def main():
+    st.set_page_config(page_title="Deep Logic Chess — XAI Tutor", layout="wide")
+    st.title("Deep Logic Chess — XAI Edition")
+    st.write("Human-like explanations for beginner chess moves. (Weights from offline Colab are hardcoded.)")
 
-# --- SIDEBAR: GAME LOADER ---
-with st.sidebar:
-    st.header("📥 Load Game")
-    
-    # Display ML Weights Info
-    with st.expander("🧠 ML Insights (from Colab)"):
-        st.write("**Importance for Beginners:**")
-        st.metric("Checks", f"{ML_WEIGHTS['check']:.4f}", help="Highest priority")
-        st.metric("Captures", f"{ML_WEIGHTS['capture']:.4f}", help="Medium priority")
-        st.metric("Center Control", f"{ML_WEIGHTS['center']:.4f}", help="Low priority")
-        st.caption("These weights were learned from 20,000 games of players rated <1500 Elo")
-    
-    pgn_txt = st.text_area("Paste PGN:", height=100)
-    
-    if st.button("Load & Reset"):
-        if pgn_txt:
-            try:
-                pgn_io = io.StringIO(pgn_txt)
-                game = chess.pgn.read_game(pgn_io)
-                st.session_state.game_moves = list(game.mainline_moves())
-                st.session_state.board = game.board()
-                st.session_state.move_index = 0
-                st.session_state.feedback_data = None
-                st.session_state.move_history = []
-                st.session_state.last_best_eval = 0.35
-                st.success(f"✅ Loaded {len(st.session_state.game_moves)} moves")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Invalid PGN: {e}")
-    
-    if st.button("🗑️ Clear Board"):
-        st.session_state.board.reset()
-        st.session_state.game_moves = []
-        st.session_state.move_index = 0
-        st.session_state.feedback_data = None
-        st.session_state.move_history = []
-        st.rerun()
-    
-    # Move History Display
-    if st.session_state.move_history:
-        st.divider()
-        st.subheader("📜 Move History")
-        for i, entry in enumerate(st.session_state.move_history[-10:], 1):  # Last 10 moves
-            color = entry['feedback']['color']
-            label = entry['feedback']['label']
-            st.markdown(
-                f"**{i}.** {entry['san']} - "
-                f"<span style='color:{color}'>{label}</span>",
-                unsafe_allow_html=True
-            )
+    init_session_state()
 
-# --- LAYOUT ---
-col_main, col_info = st.columns([1.5, 1.2])
+    # Try to initialize engine
+    engine = None
+    engine_error = None
+    try:
+        engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+        # Ask engine to use MultiPV if available (some engines ignore configure)
+        try:
+            engine.configure({"MultiPV": 9})
+        except Exception:
+            pass
+    except Exception as e:
+        engine_error = str(e)
 
-# --- AUTO-ANALYSIS (Runs on every board state change) ---
-with st.spinner("Analyzing position..."):
-    best_plan, candidates = get_analysis(st.session_state.board, STOCKFISH_PATH)
+    # Left: board and move input. Right: feedback and engine analysis
+    col1, col2 = st.columns([1.1, 1])
 
-# Prepare arrow for best move suggestion
-arrows = []
-if best_plan:
-    m1 = best_plan['move']
-    arrows.append(chess.svg.Arrow(m1.from_square, m1.to_square, color="#4CAF50"))
+    with col1:
+        st.subheader("Board")
+        render_board_ui(st.session_state.board)
 
-# ========================================
-# LEFT COLUMN: BOARD & CONTROLS
-# ========================================
-with col_main:
-    # 1. BOARD DISPLAY
-    st.markdown(render_board(st.session_state.board, arrows), unsafe_allow_html=True)
-    
-    # 2. NAVIGATION BUTTONS
-    if st.session_state.game_moves:
-        c1, c2, c3 = st.columns([0.8, 2, 0.8])
-        
-        # Check if current board matches game sequence
-        game_board_at_index = chess.Board()
-        for i in range(st.session_state.move_index):
-            game_board_at_index.push(st.session_state.game_moves[i])
-        on_track = (game_board_at_index.fen() == st.session_state.board.fen())
-        
-        # UNDO BUTTON
-        with c1:
-            if st.button("◀ Undo", use_container_width=True):
-                if st.session_state.board.move_stack:
-                    st.session_state.board.pop()
-                    if on_track and st.session_state.move_index > 0:
-                        st.session_state.move_index -= 1
-                    
-                    # Remove last move from history
-                    if st.session_state.move_history:
-                        st.session_state.move_history.pop()
-                    
-                    # Auto-fix index if needed
-                    undo_fen = st.session_state.board.fen()
-                    temp = chess.Board()
-                    if temp.fen() == undo_fen:
-                        st.session_state.move_index = 0
-                    else:
-                        for i, m in enumerate(st.session_state.game_moves):
-                            temp.push(m)
-                            if temp.fen() == undo_fen:
-                                st.session_state.move_index = i + 1
-                                break
-                    
-                    st.session_state.feedback_data = None
-                    st.rerun()
-        
-        # PROGRESS INDICATOR
-        with c2:
-            progress = st.session_state.move_index / len(st.session_state.game_moves)
-            st.progress(progress)
-            st.caption(f"Move {st.session_state.move_index} / {len(st.session_state.game_moves)}")
-        
-        # NEXT/SYNC BUTTON
-        with c3:
-            if on_track:
-                if st.button("Next ▶", use_container_width=True) and \
-                   st.session_state.move_index < len(st.session_state.game_moves):
-                    
-                    # Store board state before move
-                    board_before = st.session_state.board.copy()
-                    expected_eval = best_plan['eval'] if best_plan else 0
-                    best_move_obj = best_plan['move'] if best_plan else None
-                    
-                    # Execute move
-                    move = st.session_state.game_moves[st.session_state.move_index]
-                    move_san = board_before.san(move)
-                    st.session_state.board.push(move)
-                    st.session_state.move_index += 1
-                    
-                    # Analyze resulting position
-                    new_best, _ = get_analysis(st.session_state.board, STOCKFISH_PATH)
-                    curr_eval = new_best['eval'] if new_best else 0
-                    
-                    # Judge move quality
-                    feedback = judge_move(
-                        curr_eval,
-                        expected_eval,
-                        board_before,
-                        move,
-                        best_move_obj
-                    )
-                    st.session_state.feedback_data = feedback
-                    
-                    # Add to move history
-                    st.session_state.move_history.append({
-                        'san': move_san,
-                        'feedback': feedback
-                    })
-                    
-                    st.rerun()
+        # Move input area: user may enter SAN or UCI
+        with st.form("move_form", clear_on_submit=False):
+            move_input = st.text_input("Enter your move (SAN or UCI), or leave blank and click 'Next ▶' for engine move", "")
+            c1, c2, c3 = st.columns([1, 1, 1])
+            with c1:
+                play_button = st.form_submit_button("Play Move")
+            with c2:
+                next_button = st.form_submit_button("Next ▶ (Engine move)")
+            with c3:
+                reset_button = st.form_submit_button("Reset Position")
+
+        # Actions
+        if reset_button:
+            st.session_state.board = chess.Board()
+            st.session_state.history = []
+            st.session_state.last_feedback = None
+            st.experimental_rerun()
+
+        # If engine missing, warn but still allow manual play
+        if engine_error:
+            st.warning(f"Stockfish engine not available at '{STOCKFISH_PATH}'. Some analysis features will be disabled. Error: {engine_error}")
+
+        if play_button:
+            user_move_text = move_input.strip()
+            if not user_move_text:
+                st.warning("Enter a move in SAN (e.g., Nf3) or UCI (e2e4) to play, or click Next ▶ to let engine move.")
             else:
-                if st.button("Sync ⏩", use_container_width=True):
-                    st.session_state.board = game_board_at_index
-                    if st.session_state.move_index < len(st.session_state.game_moves):
-                        move = st.session_state.game_moves[st.session_state.move_index]
-                        move_san = st.session_state.board.san(move)
-                        
-                        # Recalculate expectation
-                        resume_best, _ = get_analysis(game_board_at_index, STOCKFISH_PATH)
-                        exp_eval = resume_best['eval'] if resume_best else 0
-                        best_mv = resume_best['move'] if resume_best else None
-                        
-                        board_before = st.session_state.board.copy()
-                        st.session_state.board.push(move)
-                        st.session_state.move_index += 1
-                        
-                        new_best, _ = get_analysis(st.session_state.board, STOCKFISH_PATH)
-                        curr_eval = new_best['eval'] if new_best else 0
-                        
-                        feedback = judge_move(
-                            curr_eval,
-                            exp_eval,
-                            board_before,
-                            move,
-                            best_mv
-                        )
-                        st.session_state.feedback_data = feedback
-                        
-                        st.session_state.move_history.append({
-                            'san': move_san,
-                            'feedback': feedback
+                board = st.session_state.board
+                try:
+                    # Try SAN first, then UCI
+                    try:
+                        mv = board.parse_san(user_move_text)
+                    except Exception:
+                        mv = chess.Move.from_uci(user_move_text)
+                        if mv not in board.legal_moves:
+                            raise ValueError("Illegal move")
+                    board.push(mv)
+                    st.session_state.history.append(mv.uci())
+                    # Analyze the move if engine available
+                    if engine:
+                        # Compare to engine best (unmodified) to compute eval drop
+                        # Get best engine move and its eval from the position BEFORE the move
+                        pre_board = board.copy()
+                        pre_board.pop()  # remove user's move, so pre_board is before the move
+                        try:
+                            best_infos = get_engine_candidates(engine, pre_board, multipv=1, depth=16)
+                            best_eval = board_score_from_engine(pre_board, best_infos[0]) if best_infos else 0.0
+                        except Exception:
+                            best_eval = 0.0
+                        # Now get eval for the played move (we can ask engine to evaluate resulting position)
+                        try:
+                            eval_after_list = engine.analyse(board, chess.engine.Limit(depth=12))
+                            eval_after = board_score_from_engine(pre_board, eval_after_list)  # careful: info is from pre_board context
+                            # But better to get 'score' from eval_after_list directly (it is from perspective of side to move on pre_board)
+                            eval_move = cp_to_score(eval_after_list.get("score")) if eval_after_list.get("score") else 0.0
+                        except Exception:
+                            eval_move = 0.0
+
+                        # Convert white POV to side-to-move perspective before the move
+                        multiplier = 1.0 if pre_board.turn == chess.WHITE else -1.0
+                        best_for_side = multiplier * best_eval
+                        move_for_side = multiplier * eval_move
+                        eval_drop = best_for_side - move_for_side
+
+                        # Create message
+                        feedback_msg = explain_bad_move(eval_drop) if eval_drop > 0.15 else "Good move."
+                        st.session_state.last_feedback = {
+                            "type": "user_move",
+                            "message": feedback_msg,
+                            "eval_drop": eval_drop
+                        }
+                    else:
+                        st.session_state.last_feedback = {"type": "user_move", "message": "Move played. Engine analysis unavailable."}
+
+                except Exception as e:
+                    st.error(f"Couldn't parse or play move: {e}")
+
+        if next_button:
+            if not engine:
+                st.warning("Engine not available. Cannot play engine move.")
+            else:
+                board = st.session_state.board
+                try:
+                    # Get ML-augmented candidates and play the top one
+                    candidates = get_analysis(engine, board, multipv=9, depth=18)
+                    if not candidates:
+                        # fallback to engine best single move
+                        info = engine.analyse(board, chess.engine.Limit(depth=18))
+                        mv = info["pv"][0]
+                        board.push(mv)
+                        st.session_state.history.append(mv.uci())
+                        st.session_state.last_feedback = {"type": "engine_move", "message": "Engine played (no candidates)." }
+                    else:
+                        top = candidates[0]
+                        board.push(top.move)
+                        st.session_state.history.append(top.move.uci())
+                        # feedback for engine move: explain why it's chosen
+                        expl = explain_good_move(top)
+                        st.session_state.last_feedback = {"type": "engine_move", "message": f"Engine (ML-augmented) played {top.san}. {expl}"}
+                except Exception as e:
+                    st.error(f"Engine failed to provide move: {e}")
+
+        st.markdown("---")
+        st.subheader("Move history (PGN-like):")
+        history_str = " ".join([chess.Move.from_uci(u).uci() for u in st.session_state.history])
+        st.code(history_str if history_str else "No moves yet.")
+
+    # Right column: Analysis & explanations
+    with col2:
+        st.subheader("Feedback / Analysis")
+
+        if st.session_state.last_feedback:
+            fb = st.session_state.last_feedback
+            if fb.get("type") == "engine_move":
+                colored_banner(f"Engine move: {fb.get('message')}", color="blue")
+            elif fb.get("type") == "user_move":
+                # choose banner color based on eval_drop
+                ed = fb.get("eval_drop", 0.0)
+                if ed > 1.0:
+                    color = "red"
+                elif ed > 0.5:
+                    color = "orange"
+                else:
+                    color = "green"
+                colored_banner(f"User move analysis: {fb.get('message')}", color=color)
+        else:
+            st.info("No feedback yet. Play a move or click Next ▶ (Engine move).")
+
+        st.markdown("### Engine candidates (with ML re-ranking)")
+        if engine:
+            try:
+                candidates = get_analysis(engine, st.session_state.board, multipv=9, depth=14)
+                if not candidates:
+                    st.write("No candidates available from engine.")
+                else:
+                    # Show a compact table of top candidates
+                    rows = []
+                    for c in candidates[:9]:
+                        # Stockfish score from White POV, show converted for side to move
+                        multiplier = 1.0 if st.session_state.board.turn == chess.WHITE else -1.0
+                        sf_for_side = multiplier * c.stockfish_score
+                        rows.append({
+                            "Move": c.san,
+                            "SF_score(pawns side-TO-move)": f"{sf_for_side:+.2f}",
+                            "ML_bonus": f"+{c.ml_bonus:.3f}",
+                            "Combined": f"{c.combined_score:+.3f}",
+                            "Capture": c.is_capture,
+                            "Check": c.is_check,
+                            "Center": c.center_control
                         })
-                    st.rerun()
-    else:
-        if st.button("◀ Undo Last", use_container_width=True):
-            if st.session_state.board.move_stack:
-                st.session_state.board.pop()
-                st.session_state.feedback_data = None
-                if st.session_state.move_history:
-                    st.session_state.move_history.pop()
-                st.rerun()
+                    # Use st.table to render
+                    import pandas as pd
+                    df = pd.DataFrame(rows)
+                    st.dataframe(df, use_container_width=True)
+            except Exception as e:
+                st.error(f"Failed to compute candidates: {e}")
+        else:
+            st.warning("Stockfish not available — cannot produce candidates.")
 
-# ========================================
-# RIGHT COLUMN: FEEDBACK & ANALYSIS
-# ========================================
-with col_info:
-    # 1. FEEDBACK BANNER
-    if st.session_state.feedback_data:
-        data = st.session_state.feedback_data
-        st.markdown(f"""
-        <div style="background-color: {data['color']}; color: white; padding: 15px; 
-                    border-radius: 8px; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-            <h3 style="margin:0; text-align: center;">{data['label']}</h3>
-            <p style="margin:8px 0 0 0; text-align: center; font-size: 15px;">
-                {data['text']}
-            </p>
-            <p style="margin:8px 0 0 0; text-align: center; font-size: 12px; opacity: 0.9;">
-                Eval drop: {data.get('eval_drop', 0):.2f} pawns
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown("""
-        <div style="background-color: #f0f2f6; color: #333; padding: 15px; 
-                    border-radius: 8px; margin-bottom: 15px; text-align: center;">
-            <p style="margin:0; font-size: 14px;">
-                📝 Make a move to see AI feedback
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # 2. ENGINE SUGGESTION (ML-Enhanced)
-    st.subheader("💡 AI Recommendation")
-    if best_plan:
-        col_eval, col_move = st.columns([1, 2])
-        
-        with col_eval:
-            # Show both base Stockfish eval and ML-adjusted eval
-            st.metric(
-                "Base Eval",
-                f"{best_plan['base_eval']:+.2f}",
-                help="Raw Stockfish evaluation"
-            )
-            if best_plan['ml_bonus'] > 0:
-                st.metric(
-                    "ML Bonus",
-                    f"+{best_plan['ml_bonus']:.2f}",
-                    help="Bonus from beginner-friendly factors"
-                )
-        
-        with col_move:
-            st.success(f"**Best:** {best_plan['san']}")
-            st.caption(f"Final Score: {best_plan['eval']:+.2f}")
-        
-        st.markdown(f"**Why this move?** {best_plan['explanation']}")
-        st.caption(f"📊 Continuation: {st.session_state.board.variation_san(best_plan['pv'])}")
-    else:
-        st.warning("Analysis unavailable")
-    
-    st.divider()
-    
-    # 3. ALTERNATIVE MOVES
-    st.subheader("🔍 Explore Alternatives")
-    if candidates:
-        # Top 3 moves (Best tier)
-        st.caption("**Top Choices:**")
-        cols1 = st.columns(3)
-        for i, cand in enumerate(candidates[:3]):
-            with cols1[i]:
-                button_label = f"{cand['san']}"
-                if cand['ml_bonus'] > 0:
-                    button_label += " 🌟"  # Star for ML-boosted moves
-                
-                if st.button(button_label, key=f"top_{i}", use_container_width=True):
-                    st.session_state.board.push(cand['move'])
-                    st.session_state.feedback_data = {
-                        "label": "✅ Best Move" if i == 0 else "🆗 Good Alternative",
-                        "color": "green" if i == 0 else "blue",
-                        "text": cand['explanation'],
-                        "eval_drop": 0.0
-                    }
-                    st.rerun()
-                
-                # Show evaluation with ML bonus indicator
-                eval_display = f"{cand['eval']:+.2f}"
-                if cand['ml_bonus'] > 0:
-                    eval_display += f" (+{cand['ml_bonus']:.2f})"
-                st.markdown(
-                    f"<div style='text-align:center; font-size:11px; color:gray; margin-top:-8px;'>"
-                    f"{eval_display}</div>",
-                    unsafe_allow_html=True
-                )
-        
-        # Middle 3 moves (Playable tier)
-        if len(candidates) > 3:
-            st.caption("**Playable Options:**")
-            cols2 = st.columns(3)
-            for i, cand in enumerate(candidates[3:6]):
-                idx = i + 3
-                with cols2[i]:
-                    if st.button(f"{cand['san']}", key=f"mid_{idx}", use_container_width=True):
-                        st.session_state.board.push(cand['move'])
-                        st.session_state.feedback_data = {
-                            "label": "🆗 Playable",
-                            "color": "blue",
-                            "text": cand['explanation'],
-                            "eval_drop": 0.0
-                        }
-                        st.rerun()
-                    st.markdown(
-                        f"<div style='text-align:center; font-size:11px; color:gray; margin-top:-8px;'>"
-                        f"{cand['eval']:+.2f}</div>",
-                        unsafe_allow_html=True
-                    )
-        
-        # Bottom 3 moves (Risky tier)
-        if len(candidates) > 6:
-            st.caption("**Risky Moves:**")
-            cols3 = st.columns(3)
-            for i, cand in enumerate(candidates[6:9]):
-                idx = i + 6
-                with cols3[i]:
-                    if st.button(f"{cand['san']}", key=f"low_{idx}", use_container_width=True):
-                        st.session_state.board.push(cand['move'])
-                        st.session_state.feedback_data = {
-                            "label": "⚠️ Risky",
-                            "color": "orange",
-                            "text": cand['explanation'],
-                            "eval_drop": 0.0
-                        }
-                        st.rerun()
-                    st.markdown(
-                        f"<div style='text-align:center; font-size:11px; color:gray; margin-top:-8px;'>"
-                        f"{cand['eval']:+.2f}</div>",
-                        unsafe_allow_html=True
-                    )
+        st.markdown("---")
+        st.subheader("ML Weights (from Colab)")
+        st.write(f"Checks: {ML_WEIGHTS['checks']:.4f}, Captures: {ML_WEIGHTS['captures']:.4f}, Center: {ML_WEIGHTS['center']:.4f}")
 
-# --- FOOTER ---
-st.divider()
-st.caption("""
-**🎓 About Deep Logic Chess:**  
-This AI uses machine learning insights from 20,000 beginner games to provide explanations that match how humans actually think.  
-Unlike traditional engines that prioritize perfect play, this tutor focuses on what matters most at your level.
-""")
+        st.markdown("### Tips (XAI)")
+        st.write(textwrap.dedent("""
+            - The app re-ranks Stockfish moves by adding a small ML bonus for moves that are checks, captures, or improve center control.
+            - This helps the tutor prefer moves that are easier for beginners to spot and learn from.
+            - Explanations are intentionally short and actionable.
+        """))
+
+    # Ensure engine is closed before exit
+    if engine:
+        try:
+            engine.quit()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()
