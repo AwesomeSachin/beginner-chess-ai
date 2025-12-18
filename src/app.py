@@ -71,38 +71,48 @@ def explain_good_move(board_before, move):
     return " ".join(narrative)
 
 # --- LOGIC 2: NEGATIVE EXPLANATION (Bad Moves) ---
-def explain_bad_move(board_before, played_move, best_move, engine):
-    """Checks WHY the move is bad by looking at opponent response."""
+def explain_bad_move(board_before, played_move, best_move, engine, eval_diff):
+    """Checks WHY the move is bad using Logic + Engine."""
     
-    # 1. BLUNDER CHECK (Hanging Piece)
-    board_after = board_before.copy()
-    board_after.push(played_move)
-    
-    # Did we just hang a piece?
-    if board_after.is_attacked_by(not board_after.turn, played_move.to_square):
-        if not board_before.is_capture(played_move): # If it wasn't a trade
-            # Is it defended?
-            if not board_after.is_attacked_by(board_after.turn, played_move.to_square):
-                 return "Blunder. You moved to a square where the piece can be taken for free."
+    # 1. SAFETY LOCK: Only check for 'Blunders' if eval dropped significantly (> 1.0)
+    # This prevents safe moves like h3 from being called blunders.
+    if eval_diff > 1.0:
+        board_after = board_before.copy()
+        board_after.push(played_move)
+        
+        # Check if OPPONENT (board_after.turn) attacks the square
+        # Fixed Bug: Old code checked 'not turn' which was Self!
+        if board_after.is_attacked_by(board_after.turn, played_move.to_square):
+             if not board_before.is_capture(played_move): 
+                 # Is it defended by us?
+                 if not board_after.is_attacked_by(not board_after.turn, played_move.to_square):
+                     return "Blunder. You hung a piece for free!"
+                 else:
+                     return "Mistake. You moved into a bad exchange."
 
     # 2. WHAT DOES THE OPPONENT DO NOW?
-    # Ask engine for opponent's best response
     try:
+        board_after = board_before.copy()
+        board_after.push(played_move)
         info = engine.analyse(board_after, chess.engine.Limit(time=0.1))
-        opp_resp = info["pv"][0]
-        opp_san = board_after.san(opp_resp)
         
-        # If opponent captures something
-        if board_after.is_capture(opp_resp):
-            return f"Mistake. Allows opponent to capture with {opp_san}."
-        
-        # If opponent takes center
-        if opp_resp.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
-            return f"Passive. Allows opponent to take the center with {opp_san}."
+        if info and "pv" in info:
+            opp_resp = info["pv"][0]
+            opp_san = board_after.san(opp_resp)
             
-        return f"Inaccuracy. Allows opponent to play {opp_san} and seize the initiative."
+            # If opponent captures something
+            if board_after.is_capture(opp_resp):
+                return f"Mistake. Allows opponent to capture with {opp_san}."
+            
+            # If opponent takes center
+            if opp_resp.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
+                return f"Passive. Allows opponent to take the center with {opp_san}."
+                
+            return f"Inaccuracy. Allows opponent to play {opp_san} and seize initiative."
     except:
-        return "Mistake. Weakens your position."
+        pass
+
+    return "Inaccuracy. A passive move that doesn't improve your position."
 
 # --- LOGIC: JUDGE MOVE (Determines Color/Label) ---
 def get_move_feedback(diff, board_before, move, best_move_obj, engine):
@@ -116,13 +126,13 @@ def get_move_feedback(diff, board_before, move, best_move_obj, engine):
         text = explain_good_move(board_before, move)
     elif diff <= 1.2:
         label, color = "⚠️ Inaccuracy", "orange"
-        text = explain_bad_move(board_before, move, best_move_obj, engine)
+        text = explain_bad_move(board_before, move, best_move_obj, engine, diff)
     elif diff <= 2.5:
         label, color = "❌ Mistake", "#FF5722"
-        text = explain_bad_move(board_before, move, best_move_obj, engine)
+        text = explain_bad_move(board_before, move, best_move_obj, engine, diff)
     else:
         label, color = "😱 Blunder", "red"
-        text = "Severe Error. Likely hung a piece or missed a mate."
+        text = explain_bad_move(board_before, move, best_move_obj, engine, diff)
         
     return {"label": label, "color": color, "text": text}
 
@@ -164,10 +174,17 @@ def get_analysis(board, engine_path):
         
         final_score = (score/100) + bonus
         
-        # --- PRE-CALCULATE FEEDBACK FOR BUTTONS ---
-        # We calculate the label NOW so the button matches the text
+        # --- PRE-CALCULATE FEEDBACK ---
         diff = (best_score_raw - score) / 100
-        feedback = get_move_feedback(diff, board, move, best_move_obj, engine)
+        
+        # We need a temporary engine instance for explanation? 
+        # Actually, for the candidate list, we don't want to spawn 9 engines.
+        # So for the candidate list, we use a Simplified Explainer.
+        
+        if diff > 0.5:
+            feedback = {"label": "⚠️/❌", "color": "orange", "text": "Alternative move (weaker)."}
+        else:
+            feedback = {"label": "✅/🆗", "color": "blue", "text": explain_good_move(board, move)}
 
         candidates.append({
             "move": move,
@@ -175,7 +192,8 @@ def get_analysis(board, engine_path):
             "eval": score/100,
             "score": final_score,
             "pv": line["pv"][:5],
-            "feedback": feedback # Store the correct label/color
+            "feedback": feedback,
+            "diff": diff
         })
     
     engine.quit()
@@ -265,8 +283,7 @@ with col_main:
                     st.session_state.board.push(move)
                     st.session_state.move_index += 1
                     
-                    # RUN TEMP ENGINE FOR FEEDBACK
-                    # We need the engine instance to explain bad moves
+                    # RUN TEMP ENGINE FOR DETAILED FEEDBACK (On actual Move)
                     temp_engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
                     
                     # Analyze Result
@@ -334,7 +351,6 @@ with col_info:
         c_eval.metric("Eval", f"{best_plan['eval']:+.2f}")
         c_move.success(f"**Best:** {best_plan['san']}")
         
-        # Engine explanation uses the Good Logic (always positive for suggestions)
         st.markdown(f"**Reason:** {explain_good_move(st.session_state.board, best_plan['move'])}")
         st.caption(f"Line: {st.session_state.board.variation_san(best_plan['pv'])}")
     
@@ -343,24 +359,35 @@ with col_info:
     # 3. ALTERNATIVE MOVES
     st.subheader("Explore Alternative Moves")
     if candidates:
-        # Create grid
         cols = st.columns(3)
-        for i, cand in enumerate(candidates[:9]): # Top 9 moves
-            col = cols[i % 3] # Cycle through columns
-            
+        for i, cand in enumerate(candidates[:9]): 
+            col = cols[i % 3] 
             with col:
-                # DYNAMIC LABELING: Use the pre-calculated feedback
-                fb = cand['feedback']
-                
-                # Button Text: Move SAN
+                # We need to calculate the precise label for these buttons too
+                # But spawning engine 9 times is slow.
+                # So we use a rough heuristic for the button grid
+                diff = cand['diff']
+                if diff <= 0.5:
+                    lbl, clr = "Good", "green"
+                elif diff <= 1.2:
+                    lbl, clr = "Inaccuracy", "orange"
+                else:
+                    lbl, clr = "Mistake", "#FF5722"
+
                 if st.button(f"{cand['san']}", key=f"move_{i}", use_container_width=True):
                     st.session_state.board.push(cand['move'])
+                    
+                    # For button clicks, we run the FULL explanation engine once
+                    temp_eng = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+                    best_mv_obj = best_plan['move'] if best_plan else None
+                    fb = get_move_feedback(diff, st.session_state.board, cand['move'], best_mv_obj, temp_eng)
+                    temp_eng.quit()
+                    
                     st.session_state.feedback_data = fb
                     st.rerun()
                 
-                # Label under button (Colored based on quality)
                 st.markdown(f"""
                 <div style='text-align:center; font-size:12px; margin-top:-10px; margin-bottom:10px;'>
-                    <span style='color:{fb['color']}; font-weight:bold;'>{fb['label']}</span> ({cand['eval']:+.2f})
+                    <span style='color:{clr}; font-weight:bold;'>{lbl}</span> ({cand['eval']:+.2f})
                 </div>
                 """, unsafe_allow_html=True)
