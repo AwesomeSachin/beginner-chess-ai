@@ -29,7 +29,7 @@ def render_board(board, arrows=[]):
     b64 = base64.b64encode(board_svg.encode('utf-8')).decode("utf-8")
     return f'<img src="data:image/svg+xml;base64,{b64}" width="100%" style="display:block; margin-bottom:10px;" />'
 
-# --- LOGIC 1: POSITIVE EXPLANATION (Only for Good Moves) ---
+# --- LOGIC 1: POSITIVE EXPLANATION (Good Moves) ---
 def explain_good_move(board_before, move):
     """Explains WHY a good move is good."""
     narrative = []
@@ -59,7 +59,7 @@ def explain_good_move(board_before, move):
     if new_threats:
         narrative.append(f"Attacks the {new_threats[0]}!")
 
-    # 4. STRATEGY (Strict Version)
+    # 4. STRATEGY
     if not narrative:
         if board_before.fullmove_number < 15: # Opening Phase
             if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
@@ -70,23 +70,18 @@ def explain_good_move(board_before, move):
                 narrative.append("Develops a piece to an active square.")
         
         # STRICT PAWN LOGIC
-        # Only praise pawns if they actually do something useful.
         if not narrative and board_before.piece_type_at(move.from_square) == chess.PAWN:
             rank = chess.square_rank(move.to_square)
-            # Center control was already checked above.
-            # Check for advanced pushes or taking space
+            # Only praise aggressive pushes
             if (board_before.turn == chess.WHITE and rank >= 4) or (board_before.turn == chess.BLACK and rank <= 3):
-                 narrative.append("Takes space and improves structure.")
-            else:
-                # If it's a small push like a3/h3, don't praise it blindly.
-                pass 
+                 narrative.append("Takes space.")
 
-    if not narrative: return "A quiet positional move."
+    if not narrative: return "A solid positional move."
     return " ".join(narrative)
 
-# --- LOGIC 2: NEGATIVE EXPLANATION (Only for Bad Moves) ---
+# --- LOGIC 2: NEGATIVE EXPLANATION (Bad Moves) ---
 def explain_bad_move(board_before, played_move, best_move):
-    """Explains WHAT WENT WRONG. Never compliments the move."""
+    """Explains WHAT WENT WRONG. Critical feedback."""
     
     # 1. HANGING PIECE / BLUNDER
     board_after = board_before.copy()
@@ -96,15 +91,19 @@ def explain_bad_move(board_before, played_move, best_move):
             return "Blunder. You moved your piece to a square where it can be captured."
 
     # 2. MISSED TACTICS
-    if board_before.is_capture(best_move) and not board_before.is_capture(played_move):
+    if best_move and board_before.is_capture(best_move) and not board_before.is_capture(played_move):
         return "Missed a tactical capture opportunity (Material Loss)."
         
     if board_after.is_checkmate():
         return "Game Over. You allowed checkmate."
 
-    # 3. PASSIVE PLAY (Catch-all for 'a3' type moves)
+    # 3. PASSIVE PLAY (Specific Logic for a3/h3 type moves)
     if board_before.piece_type_at(played_move.from_square) == chess.PAWN:
-        return "Passive pawn play. Neglects development and allows opponent initiative."
+        # If it's a short pawn move in the opening
+        rank = chess.square_rank(played_move.to_square)
+        if board_before.fullmove_number < 20:
+             if (board_before.turn == chess.WHITE and rank == 2) or (board_before.turn == chess.BLACK and rank == 5):
+                 return "Passive pawn play. Neglects development and center control."
 
     return "Passive play. Missed a chance to improve position or create a threat."
 
@@ -119,7 +118,7 @@ def get_analysis(board, engine_path):
     info = engine.analyse(board, chess.engine.Limit(time=0.4), multipv=9)
     candidates = []
     
-    # 1. Identify the BEST move (Benchmark)
+    # Identify BEST move details for comparison
     if info:
         best_score_raw = info[0]["score"].relative.score(mate_score=10000) or 0
         best_move_obj = info[0]["pv"][0]
@@ -147,11 +146,13 @@ def get_analysis(board, engine_path):
         final_score = (score/100) + bonus
         
         # --- SMART EXPLANATION SELECTOR ---
-        # Compare current move against the best move
+        # Calculate evaluation drop
         diff = (best_score_raw - score) / 100
         
-        # Stricter Threshold: >0.5 diff is bad.
-        if diff > 0.5:
+        # TIGHTER THRESHOLD:
+        # If move loses > 0.30 eval (30 centipawns), it's "Bad".
+        # This catches "Inaccuracies" like h3.
+        if diff > 0.30:
             explanation_text = explain_bad_move(board, move, best_move_obj)
         else:
             explanation_text = explain_good_move(board, move)
@@ -174,20 +175,15 @@ def judge_move(current_eval, best_eval, board_before, played_move, best_move_obj
     diff = best_eval - (-current_eval)
     
     # STRICT DECISION TREE
-    # Thresholds tightened to catch inaccuracies earlier
-    
     if diff <= 0.2:
         return {"label": "✅ Excellent", "color": "green", "text": explain_good_move(board_before, played_move)}
-    elif diff <= 0.5: # Lowered from 0.7 to 0.5
+    elif diff <= 0.4: # Tightened from 0.7
         return {"label": "🆗 Good", "color": "blue", "text": explain_good_move(board_before, played_move)}
-    elif diff <= 1.5:
-        # Inaccuracy
+    elif diff <= 1.0:
         return {"label": "⚠️ Inaccuracy", "color": "orange", "text": explain_bad_move(board_before, played_move, best_move_obj)}
     elif diff <= 3.0:
-        # Mistake
         return {"label": "❌ Mistake", "color": "#FF5722", "text": explain_bad_move(board_before, played_move, best_move_obj)}
     else:
-        # Blunder
         return {"label": "😱 Blunder", "color": "red", "text": "Severe Error. You likely hung a piece or missed a forced mate."}
 
 # --- UI START ---
