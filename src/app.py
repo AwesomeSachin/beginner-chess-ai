@@ -71,12 +71,48 @@ def explain_good_move(board_before, move):
     
     return "A solid positional improvement."
 
+# --- LOGIC: CHECK FOR HANGING PIECES ---
+def find_hanging_pieces(board):
+    """Find pieces that are attacked and undefended."""
+    hanging = []
+    for square in chess.SQUARES:
+        piece = board.piece_at(square)
+        if piece and piece.color == board.turn:
+            # Is it attacked by opponent?
+            if board.is_attacked_by(not board.turn, square):
+                # Is it NOT defended by us?
+                if not board.is_attacked_by(board.turn, square):
+                    hanging.append((square, piece))
+    return hanging
+
 # --- LOGIC: EXPLAINING CURRENT MOVE QUALITY ---
 def explain_move_quality(board_before, played_move, best_move, eval_diff):
     """
     Explains the quality of the CURRENT move based on what was missed 
     and the consequences. This is for judging moves that were actually played.
     """
+    
+    # CRITICAL CHECK: Do we have hanging pieces BEFORE this move?
+    hanging_before = find_hanging_pieces(board_before)
+    
+    # If we have hanging pieces and didn't address them, that's a blunder!
+    if hanging_before:
+        for square, piece in hanging_before:
+            # Did we move this hanging piece to safety?
+            if played_move.from_square == square:
+                # Check if it's still hanging after the move
+                board_after = board_before.copy()
+                board_after.push(played_move)
+                if board_after.is_attacked_by(not board_before.turn, played_move.to_square):
+                    if not board_after.is_attacked_by(board_before.turn, played_move.to_square):
+                        return f"BLUNDER! Your {chess.piece_name(piece.piece_type)} is still hanging after this move! You're losing material."
+                # Good, we saved it
+                break
+            else:
+                # We played a different move while a piece is hanging!
+                piece_name = chess.piece_name(piece.piece_type)
+                square_name = chess.square_name(square)
+                return f"BLUNDER! Your {piece_name} on {square_name} is hanging and you ignored it! Opponent will capture it for free."
     
     # EXCELLENT / GOOD moves (diff <= 0.7)
     if eval_diff <= 0.7:
@@ -117,6 +153,16 @@ def explain_move_quality(board_before, played_move, best_move, eval_diff):
     elif eval_diff <= 1.5:
         reasons = []
         
+        # Check if we created a NEW hanging piece with this move
+        board_after = board_before.copy()
+        board_after.push(played_move)
+        new_hanging = find_hanging_pieces(board_after)
+        
+        if new_hanging:
+            for square, piece in new_hanging:
+                if square == played_move.to_square:
+                    return f"Inaccuracy. This leaves your {chess.piece_name(piece.piece_type)} undefended. Opponent can capture it."
+        
         # Did we miss a capture?
         if board_before.is_capture(best_move) and not board_before.is_capture(played_move):
             victim = board_before.piece_at(best_move.to_square)
@@ -127,30 +173,26 @@ def explain_move_quality(board_before, played_move, best_move, eval_diff):
         if board_before.gives_check(best_move) and not board_before.gives_check(played_move):
             reasons.append("missed a checking move that would pressure the opponent")
         
-        # Did we leave a piece hanging?
-        board_after = board_before.copy()
-        board_after.push(played_move)
-        moved_piece_square = played_move.to_square
-        if board_after.is_attacked_by(not board_before.turn, moved_piece_square):
-            # Check if it's defended
-            if not board_after.is_attacked_by(board_before.turn, moved_piece_square):
-                piece = board_after.piece_at(moved_piece_square)
-                if piece:
-                    reasons.append(f"leaves your {chess.piece_name(piece.piece_type)} undefended and vulnerable")
-        
         if reasons:
             return f"Inaccuracy. You {reasons[0]}. This gives opponent an advantage."
         return "Inaccurate. A better move was available that would improve your position more."
     
     # MISTAKE (1.5 < diff <= 3.0)
     elif eval_diff <= 3.0:
-        reasons = []
+        # Check if we created NEW hanging pieces
+        board_after = board_before.copy()
+        board_after.push(played_move)
+        new_hanging = find_hanging_pieces(board_after)
+        
+        if new_hanging:
+            for square, piece in new_hanging:
+                return f"Mistake! This hangs your {chess.piece_name(piece.piece_type)} on {chess.square_name(square)}. Opponent captures it for free!"
         
         # Check for missed tactics
         if board_before.is_capture(best_move):
             victim = board_before.piece_at(best_move.to_square)
             if victim:
-                reasons.append(f"Mistake! You missed winning the {chess.piece_name(victim.piece_type)}")
+                return f"Mistake! You missed winning the {chess.piece_name(victim.piece_type)}. Opponent now has a clear advantage."
         
         # Check for missed checkmate
         board_temp = board_before.copy()
@@ -158,51 +200,39 @@ def explain_move_quality(board_before, played_move, best_move, eval_diff):
         if board_temp.is_checkmate():
             return "Critical Mistake! You missed an immediate checkmate opportunity."
         
-        # Check if we hung a piece
-        board_after = board_before.copy()
-        board_after.push(played_move)
-        moved_piece_square = played_move.to_square
-        if board_after.is_attacked_by(not board_before.turn, moved_piece_square):
-            if not board_after.is_attacked_by(board_before.turn, moved_piece_square):
-                piece = board_after.piece_at(moved_piece_square)
-                if piece and piece.piece_type != chess.PAWN:
-                    return f"Mistake! This move hangs your {chess.piece_name(piece.piece_type)} - opponent can capture it for free."
-        
-        if reasons:
-            return f"{reasons[0]}. Opponent now has a clear advantage."
-        
         return "Mistake! This move significantly weakens your position and gives opponent the upper hand."
     
     # BLUNDER (diff > 3.0)
     else:
-        # Check for missed checkmate first
+        # PRIORITY 1: Check if we already had hanging pieces and ignored them
+        # (This was already handled at the top of the function)
+        
+        # PRIORITY 2: Check if we created NEW hanging pieces
+        board_after = board_before.copy()
+        board_after.push(played_move)
+        new_hanging = find_hanging_pieces(board_after)
+        
+        if new_hanging:
+            for square, piece in new_hanging:
+                piece_name = chess.piece_name(piece.piece_type)
+                if piece.piece_type == chess.QUEEN:
+                    return f"BLUNDER! You hung your Queen on {chess.square_name(square)}! This loses the game."
+                elif piece.piece_type == chess.ROOK:
+                    return f"BLUNDER! You hung your Rook on {chess.square_name(square)}! Game is likely lost."
+                else:
+                    return f"BLUNDER! This hangs your {piece_name} on {chess.square_name(square)} and throws away the game."
+        
+        # PRIORITY 3: Check for missed checkmate
         board_temp = board_before.copy()
         board_temp.push(best_move)
         if board_temp.is_checkmate():
             return "BLUNDER! You had checkmate in one move but played something else. Game-losing mistake."
         
-        # Check if we hung a major piece
-        board_after = board_before.copy()
-        board_after.push(played_move)
-        moved_piece_square = played_move.to_square
-        if board_after.is_attacked_by(not board_before.turn, moved_piece_square):
-            if not board_after.is_attacked_by(board_before.turn, moved_piece_square):
-                piece = board_after.piece_at(moved_piece_square)
-                if piece:
-                    if piece.piece_type == chess.QUEEN:
-                        return "BLUNDER! You hung your Queen! This loses the game."
-                    elif piece.piece_type == chess.ROOK:
-                        return "BLUNDER! You hung your Rook for free. This is likely game-losing."
-                    else:
-                        return f"BLUNDER! This hangs your {chess.piece_name(piece.piece_type)} and throws away the game."
-        
-        # Check if opponent can now mate us
-        board_after = board_before.copy()
-        board_after.push(played_move)
+        # PRIORITY 4: Check if opponent can now mate us
         if board_after.is_check():
             return "BLUNDER! This move walks into check or allows a devastating attack. Game is likely lost."
         
-        # Check for missed winning material
+        # PRIORITY 5: Check for missed winning material
         if board_before.is_capture(best_move):
             victim = board_before.piece_at(best_move.to_square)
             if victim and victim.piece_type in [chess.QUEEN, chess.ROOK]:
