@@ -31,7 +31,6 @@ def render_board(board, arrows=[]):
 
 # --- LOGIC 1: POSITIVE EXPLANATION (Good Moves) ---
 def explain_good_move(board_before, move):
-    """Explains WHY a good move is good."""
     narrative = []
     board_after = board_before.copy()
     board_after.push(move)
@@ -39,14 +38,11 @@ def explain_good_move(board_before, move):
     # 1. TACTICS
     if board_before.is_capture(move):
         victim = board_before.piece_at(move.to_square)
-        if victim:
-            narrative.append(f"Captures the {chess.piece_name(victim.piece_type)} (Material Gain).")
-        else:
-            narrative.append("Recaptures material.")
+        if victim: narrative.append(f"Captures {chess.piece_name(victim.piece_type)}.")
+        else: narrative.append("Recaptures material.")
 
     # 2. DEFENSE
-    was_attacked = board_before.is_attacked_by(not board_before.turn, move.from_square)
-    if was_attacked:
+    if board_before.is_attacked_by(not board_before.turn, move.from_square):
         narrative.append("Escapes a threat.")
 
     # 3. THREATS
@@ -56,62 +52,81 @@ def explain_good_move(board_before, move):
         if target and target.color != board_before.turn:
             if target.piece_type == chess.QUEEN: new_threats.append("Queen")
             elif target.piece_type == chess.ROOK: new_threats.append("Rook")
-    if new_threats:
-        narrative.append(f"Attacks the {new_threats[0]}!")
+    if new_threats: narrative.append(f"Attacks the {new_threats[0]}!")
 
     # 4. STRATEGY
     if not narrative:
-        if board_before.fullmove_number < 15:
-            if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
-                narrative.append("Fights for the center.")
-            elif board_before.is_castling(move):
-                narrative.append("Castles for King safety.")
-            elif board_before.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
-                narrative.append("Develops a piece to an active square.")
-        
-        # STRICT PAWN LOGIC (Only active moves)
-        if not narrative and board_before.piece_type_at(move.from_square) == chess.PAWN:
-            rank = chess.square_rank(move.to_square)
-            if (board_before.turn == chess.WHITE and rank >= 4) or (board_before.turn == chess.BLACK and rank <= 3):
+        if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
+            narrative.append("Controls the center.")
+        elif board_before.is_castling(move):
+            narrative.append("Castles for safety.")
+        elif board_before.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
+            narrative.append("Active development.")
+        elif board_before.piece_type_at(move.from_square) == chess.PAWN:
+             rank = chess.square_rank(move.to_square)
+             if (board_before.turn == chess.WHITE and rank >= 4) or (board_before.turn == chess.BLACK and rank <= 3):
                  narrative.append("Takes space.")
 
-    if not narrative: return "A solid positional move."
+    if not narrative: return "Solid improvement."
     return " ".join(narrative)
 
 # --- LOGIC 2: NEGATIVE EXPLANATION (Bad Moves) ---
-def explain_bad_move(board_before, played_move, best_move, eval_diff):
-    """Explains WHAT WENT WRONG based on severity."""
+def explain_bad_move(board_before, played_move, best_move, engine):
+    """Checks WHY the move is bad by looking at opponent response."""
     
-    # 1. BLUNDER CHECK (Must lose significant eval > 1.5)
-    if eval_diff > 1.5:
-        board_after = board_before.copy()
-        board_after.push(played_move)
-        # Did we move to a square where we die?
-        if board_after.is_attacked_by(not board_after.turn, played_move.to_square):
-            if not board_before.is_capture(played_move):
-                return "Blunder. You moved your piece to a square where it can be captured for free."
+    # 1. BLUNDER CHECK (Hanging Piece)
+    board_after = board_before.copy()
+    board_after.push(played_move)
+    
+    # Did we just hang a piece?
+    if board_after.is_attacked_by(not board_after.turn, played_move.to_square):
+        if not board_before.is_capture(played_move): # If it wasn't a trade
+            # Is it defended?
+            if not board_after.is_attacked_by(board_after.turn, played_move.to_square):
+                 return "Blunder. You moved to a square where the piece can be taken for free."
+
+    # 2. WHAT DOES THE OPPONENT DO NOW?
+    # Ask engine for opponent's best response
+    try:
+        info = engine.analyse(board_after, chess.engine.Limit(time=0.1))
+        opp_resp = info["pv"][0]
+        opp_san = board_after.san(opp_resp)
         
-        if board_after.is_checkmate():
-            return "Game Over. You allowed checkmate."
+        # If opponent captures something
+        if board_after.is_capture(opp_resp):
+            return f"Mistake. Allows opponent to capture with {opp_san}."
+        
+        # If opponent takes center
+        if opp_resp.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
+            return f"Passive. Allows opponent to take the center with {opp_san}."
             
-        return "Severe Mistake. You likely hung a piece or missed a critical threat."
+        return f"Inaccuracy. Allows opponent to play {opp_san} and seize the initiative."
+    except:
+        return "Mistake. Weakens your position."
 
-    # 2. MISSED TACTICS (Medium Error > 0.7)
-    if eval_diff > 0.7:
-        if best_move and board_before.is_capture(best_move) and not board_before.is_capture(played_move):
-            return "Missed a tactical capture opportunity."
+# --- LOGIC: JUDGE MOVE (Determines Color/Label) ---
+def get_move_feedback(diff, board_before, move, best_move_obj, engine):
+    
+    # 1. ASSIGN LABEL & COLOR
+    if diff <= 0.2:
+        label, color = "✅ Excellent", "green"
+        text = explain_good_move(board_before, move)
+    elif diff <= 0.5:
+        label, color = "🆗 Good", "blue"
+        text = explain_good_move(board_before, move)
+    elif diff <= 1.2:
+        label, color = "⚠️ Inaccuracy", "orange"
+        text = explain_bad_move(board_before, move, best_move_obj, engine)
+    elif diff <= 2.5:
+        label, color = "❌ Mistake", "#FF5722"
+        text = explain_bad_move(board_before, move, best_move_obj, engine)
+    else:
+        label, color = "😱 Blunder", "red"
+        text = "Severe Error. Likely hung a piece or missed a mate."
+        
+    return {"label": label, "color": color, "text": text}
 
-    # 3. PASSIVE PLAY / INACCURACY (Small Error 0.3 - 0.7)
-    if board_before.piece_type_at(played_move.from_square) == chess.PAWN:
-        rank = chess.square_rank(played_move.to_square)
-        if board_before.fullmove_number < 20:
-             # Detect passive rook pawn moves (a3/h3)
-             if (board_before.turn == chess.WHITE and rank == 2) or (board_before.turn == chess.BLACK and rank == 5):
-                 return "Passive pawn play. Neglects development and allows opponent initiative."
-
-    return "Inaccuracy. A passive move that allows the opponent to improve their position."
-
-# --- LOGIC: ANALYSIS ---
+# --- MAIN ANALYSIS ENGINE ---
 def get_analysis(board, engine_path):
     try:
         engine = chess.engine.SimpleEngine.popen_uci(engine_path)
@@ -149,14 +164,10 @@ def get_analysis(board, engine_path):
         
         final_score = (score/100) + bonus
         
-        # --- SMART EXPLANATION SELECTOR ---
+        # --- PRE-CALCULATE FEEDBACK FOR BUTTONS ---
+        # We calculate the label NOW so the button matches the text
         diff = (best_score_raw - score) / 100
-        
-        # Threshold: If diff > 0.40, use Bad Logic. Else use Good Logic.
-        if diff > 0.40:
-            explanation_text = explain_bad_move(board, move, best_move_obj, diff)
-        else:
-            explanation_text = explain_good_move(board, move)
+        feedback = get_move_feedback(diff, board, move, best_move_obj, engine)
 
         candidates.append({
             "move": move,
@@ -164,28 +175,13 @@ def get_analysis(board, engine_path):
             "eval": score/100,
             "score": final_score,
             "pv": line["pv"][:5],
-            "explanation": explanation_text
+            "feedback": feedback # Store the correct label/color
         })
     
     engine.quit()
     candidates.sort(key=lambda x: x['score'], reverse=True)
     
     return candidates[0] if candidates else None, candidates
-
-def judge_move(current_eval, best_eval, board_before, played_move, best_move_obj):
-    diff = best_eval - (-current_eval)
-    
-    # STRICT DECISION TREE
-    if diff <= 0.2:
-        return {"label": "✅ Excellent", "color": "green", "text": explain_good_move(board_before, played_move)}
-    elif diff <= 0.4:
-        return {"label": "🆗 Good", "color": "blue", "text": explain_good_move(board_before, played_move)}
-    elif diff <= 1.0:
-        return {"label": "⚠️ Inaccuracy", "color": "orange", "text": explain_bad_move(board_before, played_move, best_move_obj, diff)}
-    elif diff <= 2.0:
-        return {"label": "❌ Mistake", "color": "#FF5722", "text": explain_bad_move(board_before, played_move, best_move_obj, diff)}
-    else:
-        return {"label": "😱 Blunder", "color": "red", "text": explain_bad_move(board_before, played_move, best_move_obj, diff)}
 
 # --- UI START ---
 st.title("♟️ Deep Logic Chess Analyst")
@@ -260,6 +256,7 @@ with col_main:
         with c3:
             if on_track:
                 if st.button("Next ▶", use_container_width=True) and st.session_state.move_index < len(st.session_state.game_moves):
+                    # Data Capture
                     board_before = st.session_state.board.copy()
                     expected_eval = best_plan['eval'] if best_plan else 0
                     best_move_obj = best_plan['move'] if best_plan else None
@@ -268,25 +265,41 @@ with col_main:
                     st.session_state.board.push(move)
                     st.session_state.move_index += 1
                     
+                    # RUN TEMP ENGINE FOR FEEDBACK
+                    # We need the engine instance to explain bad moves
+                    temp_engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+                    
+                    # Analyze Result
                     new_best, _ = get_analysis(st.session_state.board, STOCKFISH_PATH)
                     curr_eval = new_best['eval'] if new_best else 0
                     
-                    st.session_state.feedback_data = judge_move(curr_eval, expected_eval, board_before, move, best_move_obj)
+                    # Calculate Diff
+                    diff = expected_eval - (-curr_eval)
+                    
+                    st.session_state.feedback_data = get_move_feedback(diff, board_before, move, best_move_obj, temp_engine)
+                    temp_engine.quit()
                     st.rerun()
             else:
                 if st.button("Sync ⏩", use_container_width=True):
+                    # Resume
                     st.session_state.board = game_board_at_index
                     if st.session_state.move_index < len(st.session_state.game_moves):
                         move = st.session_state.game_moves[st.session_state.move_index]
+                        
                         resume_best, _ = get_analysis(game_board_at_index, STOCKFISH_PATH)
                         exp_eval = resume_best['eval'] if resume_best else 0
                         best_mv = resume_best['move'] if resume_best else None
                         
                         st.session_state.board.push(move)
                         st.session_state.move_index += 1
+                        
+                        temp_engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
                         new_best, _ = get_analysis(st.session_state.board, STOCKFISH_PATH)
                         curr_eval = new_best['eval'] if new_best else 0
-                        st.session_state.feedback_data = judge_move(curr_eval, exp_eval, game_board_at_index, move, best_mv)
+                        
+                        diff = exp_eval - (-curr_eval)
+                        st.session_state.feedback_data = get_move_feedback(diff, game_board_at_index, move, best_mv, temp_engine)
+                        temp_engine.quit()
                     st.rerun()
     else:
         if st.button("◀ Undo Last", use_container_width=True):
@@ -321,7 +334,8 @@ with col_info:
         c_eval.metric("Eval", f"{best_plan['eval']:+.2f}")
         c_move.success(f"**Best:** {best_plan['san']}")
         
-        st.markdown(f"**Reason:** {best_plan['explanation']}")
+        # Engine explanation uses the Good Logic (always positive for suggestions)
+        st.markdown(f"**Reason:** {explain_good_move(st.session_state.board, best_plan['move'])}")
         st.caption(f"Line: {st.session_state.board.variation_san(best_plan['pv'])}")
     
     st.divider()
@@ -329,35 +343,24 @@ with col_info:
     # 3. ALTERNATIVE MOVES
     st.subheader("Explore Alternative Moves")
     if candidates:
-        cols1 = st.columns(3)
-        for i, cand in enumerate(candidates[:3]):
-            with cols1[i]:
-                if st.button(f"{cand['san']}", key=f"top_{i}", use_container_width=True):
-                    st.session_state.board.push(cand['move'])
-                    st.session_state.feedback_data = {
-                        "label": "✅ Best Move" if i==0 else "🆗 Good Alt",
-                        "color": "green" if i==0 else "blue",
-                        "text": cand['explanation']
-                    }
-                    st.rerun()
-                st.markdown(f"<div style='text-align:center; font-size:12px; color:gray; margin-top:-10px; margin-bottom:10px;'>{cand['eval']:+.2f}</div>", unsafe_allow_html=True)
-
-        cols2 = st.columns(3)
-        for i, cand in enumerate(candidates[3:6]):
-            idx = i + 3
-            with cols2[i]:
-                if st.button(f"{cand['san']}", key=f"mid_{idx}", use_container_width=True):
-                    st.session_state.board.push(cand['move'])
-                    st.session_state.feedback_data = {"label": "🆗 Playable", "color": "blue", "text": cand['explanation']}
-                    st.rerun()
-                st.markdown(f"<div style='text-align:center; font-size:12px; color:gray; margin-top:-10px; margin-bottom:10px;'>{cand['eval']:+.2f}</div>", unsafe_allow_html=True)
+        # Create grid
+        cols = st.columns(3)
+        for i, cand in enumerate(candidates[:9]): # Top 9 moves
+            col = cols[i % 3] # Cycle through columns
+            
+            with col:
+                # DYNAMIC LABELING: Use the pre-calculated feedback
+                fb = cand['feedback']
                 
-        cols3 = st.columns(3)
-        for i, cand in enumerate(candidates[6:9]):
-            idx = i + 6
-            with cols3[i]:
-                if st.button(f"{cand['san']}", key=f"low_{idx}", use_container_width=True):
+                # Button Text: Move SAN
+                if st.button(f"{cand['san']}", key=f"move_{i}", use_container_width=True):
                     st.session_state.board.push(cand['move'])
-                    st.session_state.feedback_data = {"label": "⚠️ Risky", "color": "orange", "text": cand['explanation']}
+                    st.session_state.feedback_data = fb
                     st.rerun()
-                st.markdown(f"<div style='text-align:center; font-size:12px; color:gray; margin-top:-10px; margin-bottom:10px;'>{cand['eval']:+.2f}</div>", unsafe_allow_html=True)
+                
+                # Label under button (Colored based on quality)
+                st.markdown(f"""
+                <div style='text-align:center; font-size:12px; margin-top:-10px; margin-bottom:10px;'>
+                    <span style='color:{fb['color']}; font-weight:bold;'>{fb['label']}</span> ({cand['eval']:+.2f})
+                </div>
+                """, unsafe_allow_html=True)
