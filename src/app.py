@@ -1,7 +1,7 @@
-# ============================================
+# ============================================================
 # Deep Logic Chess (XAI Edition)
-# app.py
-# ============================================
+# app.py — Central Nervous System
+# ============================================================
 
 import streamlit as st
 import chess
@@ -10,204 +10,262 @@ import chess.svg
 import base64
 import io
 
-# ============================================
-# CONFIG
-# ============================================
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
 STOCKFISH_PATH = "/usr/games/stockfish"
 
-# ML Weights learned in Google Colab
+# ---- ML Weights learned from Google Colab (BEGINNER <1500) ----
 ML_WEIGHTS = {
     "check": 0.5792,
     "capture": 0.1724,
     "center": 0.0365
 }
 
-CENTER_SQUARES = [chess.D4, chess.E4, chess.D5, chess.E5]
+CENTER_SQUARES = [chess.D4, chess.D5, chess.E4, chess.E5]
 
-# ============================================
+# ============================================================
 # SESSION STATE (APP MEMORY)
-# ============================================
+# ============================================================
 
 if "board" not in st.session_state:
     st.session_state.board = chess.Board()
 
-if "last_feedback" not in st.session_state:
-    st.session_state.last_feedback = ""
+if "history" not in st.session_state:
+    st.session_state.history = []
 
-if "last_feedback_color" not in st.session_state:
-    st.session_state.last_feedback_color = "gray"
+if "feedback" not in st.session_state:
+    st.session_state.feedback = None
 
-if "move_number" not in st.session_state:
-    st.session_state.move_number = 1
+if "best_move" not in st.session_state:
+    st.session_state.best_move = None
 
-# ============================================
-# UTILITY FUNCTIONS
-# ============================================
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
 
-def render_board(board):
-    """Render chess board as SVG inside Streamlit"""
-    svg = chess.svg.board(board=board, size=400)
+def render_board(board, arrows=None):
+    """Convert board state to SVG and render in Streamlit"""
+    svg = chess.svg.board(board, arrows=arrows, size=420)
     b64 = base64.b64encode(svg.encode("utf-8")).decode("utf-8")
-    return f'<img src="data:image/svg+xml;base64,{b64}"/>'
+    st.markdown(f'<img src="data:image/svg+xml;base64,{b64}"/>',
+                unsafe_allow_html=True)
 
-def is_center_control(move):
+
+def is_check(board, move):
+    board.push(move)
+    result = board.is_check()
+    board.pop()
+    return result
+
+
+def is_capture(board, move):
+    return board.is_capture(move)
+
+
+def controls_center(move):
     return move.to_square in CENTER_SQUARES
 
-# ============================================
-# STOCKFISH + ML ANALYSIS
-# ============================================
+
+# ============================================================
+# STOCKFISH + ML ANALYSIS ENGINE
+# ============================================================
 
 def get_analysis(board):
     """
-    Get top moves from Stockfish and re-rank them
-    using ML weights trained on beginner games.
+    Returns a ranked list of moves after injecting ML weights
     """
     engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
 
     info = engine.analyse(
         board,
-        chess.engine.Limit(depth=12),
+        chess.engine.Limit(depth=14),
         multipv=9
     )
 
-    moves = []
+    scored_moves = []
 
-    for line in info:
-        move = line["pv"][0]
-        score = line["score"].pov(board.turn).score(mate_score=10000) / 100.0
+    for item in info:
+        move = item["pv"][0]
+        score = item["score"].white().score(mate_score=10000) / 100
 
-        bonus = 0
-        if board.gives_check(move):
+        bonus = 0.0
+
+        if is_check(board, move):
             bonus += ML_WEIGHTS["check"]
-        if board.is_capture(move):
+
+        if is_capture(board, move):
             bonus += ML_WEIGHTS["capture"]
-        if is_center_control(move):
+
+        if controls_center(move):
             bonus += ML_WEIGHTS["center"]
 
-        adjusted_score = score + bonus
-
-        moves.append({
+        scored_moves.append({
             "move": move,
             "raw_score": score,
-            "adjusted_score": adjusted_score,
-            "is_check": board.gives_check(move),
-            "is_capture": board.is_capture(move),
-            "is_center": is_center_control(move)
+            "final_score": score + bonus
         })
 
     engine.quit()
 
-    moves.sort(key=lambda x: x["adjusted_score"], reverse=True)
-    return moves
+    scored_moves.sort(key=lambda x: x["final_score"], reverse=True)
+    return scored_moves
 
-# ============================================
-# EXPLANATION ENGINE (XAI)
-# ============================================
 
-def explain_good_move(data):
+# ============================================================
+# EXPLANATION LOGIC (XAI)
+# ============================================================
+
+def explain_good_move(board, move):
     explanations = []
 
-    if data["is_check"]:
-        explanations.append("puts the opponent king in check")
-    if data["is_capture"]:
-        explanations.append("captures material")
-    if data["is_center"]:
-        explanations.append("improves central control")
+    if is_capture(board, move):
+        explanations.append("Captures material")
+
+    if is_check(board, move):
+        explanations.append("Checks the king")
+
+    if controls_center(move):
+        explanations.append("Improves center control")
 
     if not explanations:
-        return "Solid move. Improves position without taking risks."
+        explanations.append("Solid improving move")
 
-    return "Excellent move! It " + " and ".join(explanations) + "."
+    return " & ".join(explanations)
 
-def explain_bad_move(eval_drop):
-    if eval_drop > 1.5:
-        return "Blunder. You lost significant material or position."
-    elif eval_drop > 0.7:
-        return "Mistake. This move weakens your position."
+
+def explain_bad_move(board, move, best_move):
+    board.push(move)
+    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+    reply = engine.analyse(board, chess.engine.Limit(depth=12))
+    engine.quit()
+    board.pop()
+
+    if reply["score"].white().score(mate_score=10000) < -200:
+        return "Blunder. You left a piece en prise."
+
+    return "Inaccurate. Missed a stronger continuation."
+
+
+# ============================================================
+# MOVE JUDGMENT ENGINE
+# ============================================================
+
+def judge_move(board, played_move):
+    analysis = get_analysis(board)
+
+    best = analysis[0]
+    best_move = best["move"]
+    best_score = best["final_score"]
+
+    played_score = None
+    for item in analysis:
+        if item["move"] == played_move:
+            played_score = item["final_score"]
+            break
+
+    if played_score is None:
+        played_score = best_score - 1.5
+
+    diff = best_score - played_score
+
+    if diff < 0.2:
+        return ("good", explain_good_move(board, played_move), best_move)
+
+    elif diff < 1.0:
+        return ("ok", "Playable, but not optimal.", best_move)
+
     else:
-        return "Passive play. A stronger move was available."
+        return ("bad", explain_bad_move(board, played_move, best_move), best_move)
 
-# ============================================
+
+# ============================================================
 # STREAMLIT UI
-# ============================================
+# ============================================================
 
 st.set_page_config(page_title="Deep Logic Chess (XAI)", layout="wide")
 
-st.title("♟️ Deep Logic Chess — XAI Edition")
-st.caption("A human-style chess tutor for beginners (Elo < 1500)")
+st.title("♟️ Deep Logic Chess — Explainable AI Tutor")
+st.caption("Stockfish + Human ML Logic (Beginner <1500 Elo)")
 
-left, right = st.columns([1, 1])
+# ------------------------------------------------------------
+# SIDEBAR (PGN LOADER)
+# ------------------------------------------------------------
 
-# --------------------------------------------
-# LEFT: BOARD
-# --------------------------------------------
-with left:
-    st.markdown(render_board(st.session_state.board), unsafe_allow_html=True)
+st.sidebar.header("📄 Load Game (PGN)")
+pgn_text = st.sidebar.text_area("Paste PGN here")
 
-    if st.button("Next ▶"):
-        if not st.session_state.board.is_game_over():
-            analysis = get_analysis(st.session_state.board)
+if st.sidebar.button("Load PGN"):
+    game = chess.pgn.read_game(io.StringIO(pgn_text))
+    board = game.board()
+    for move in game.mainline_moves():
+        board.push(move)
+    st.session_state.board = board
+    st.session_state.history = []
+    st.session_state.feedback = None
 
-            best_move = analysis[0]
-            played_move = best_move["move"]
+# ------------------------------------------------------------
+# MAIN LAYOUT
+# ------------------------------------------------------------
 
-            st.session_state.board.push(played_move)
+col1, col2 = st.columns([1.1, 0.9])
 
-            # Compare top 2 moves for evaluation drop
-            if len(analysis) > 1:
-                eval_drop = analysis[0]["adjusted_score"] - analysis[1]["adjusted_score"]
-            else:
-                eval_drop = 0
+with col1:
+    arrows = []
+    if st.session_state.best_move:
+        arrows = [(st.session_state.best_move.from_square,
+                   st.session_state.best_move.to_square)]
+    render_board(st.session_state.board, arrows)
 
-            if eval_drop < 0.2:
-                feedback = explain_good_move(best_move)
-                color = "green"
-            else:
-                feedback = explain_bad_move(eval_drop)
-                color = "red" if eval_drop > 1 else "orange"
+    c1, c2 = st.columns(2)
 
-            st.session_state.last_feedback = feedback
-            st.session_state.last_feedback_color = color
-            st.session_state.move_number += 1
+    if c1.button("▶ Next Move"):
+        analysis = get_analysis(st.session_state.board)
+        move = analysis[0]["move"]
 
-# --------------------------------------------
-# RIGHT: FEEDBACK
-# --------------------------------------------
-with right:
-    st.subheader("🧠 Move Explanation")
+        verdict, explanation, best_move = judge_move(
+            st.session_state.board, move
+        )
 
-    st.markdown(
-        f"""
-        <div style="
-            padding: 16px;
-            border-radius: 10px;
-            background-color: {st.session_state.last_feedback_color};
-            color: white;
-            font-size: 18px;
-        ">
-            {st.session_state.last_feedback or "Click Next to begin analysis."}
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+        st.session_state.board.push(move)
+        st.session_state.feedback = (verdict, explanation)
+        st.session_state.best_move = best_move
 
-    st.markdown("---")
-    st.markdown("### 🔬 ML Weights (From Colab Training)")
-    st.json(ML_WEIGHTS)
+    if c2.button("⏪ Undo"):
+        if st.session_state.board.move_stack:
+            st.session_state.board.pop()
+            st.session_state.feedback = None
+            st.session_state.best_move = None
 
+# ------------------------------------------------------------
+# FEEDBACK PANEL
+# ------------------------------------------------------------
+
+with col2:
+    st.subheader("🧠 AI Feedback")
+
+    if st.session_state.feedback:
+        verdict, explanation = st.session_state.feedback
+
+        if verdict == "good":
+            st.success(f"✅ Excellent! {explanation}")
+
+        elif verdict == "ok":
+            st.warning(f"⚠️ {explanation}")
+
+        else:
+            st.error(f"❌ {explanation}")
+
+    st.subheader("📌 Why this works")
     st.markdown("""
-    **Why this matters:**  
-    These weights were learned from **20,000 beginner games**  
-    and reflect *what actually wins games* at low Elo.
-    """)
+- **Checks** are rewarded most (0.57)
+- **Captures** matter (0.17)
+- **Positional play** matters least at beginner level
+- Stockfish calculates
+- ML *re-ranks* moves for humans
+""")
 
-# ============================================
-# FOOTER
-# ============================================
-
-st.markdown("---")
-st.caption(
-    "Deep Logic Chess | Explainable AI Project | "
-    "Stockfish + ML + Streamlit"
-)
+# ============================================================
+# END OF FILE
+# ============================================================
