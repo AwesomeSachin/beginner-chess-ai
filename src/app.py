@@ -59,7 +59,7 @@ def explain_good_move(board_before, move):
     if new_threats:
         narrative.append(f"Attacks the {new_threats[0]}!")
 
-    # 4. STRATEGY
+    # 4. STRATEGY (Strict Version)
     if not narrative:
         if board_before.fullmove_number < 15: # Opening Phase
             if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
@@ -69,11 +69,19 @@ def explain_good_move(board_before, move):
             elif board_before.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
                 narrative.append("Develops a piece to an active square.")
         
-        # Pawn Logic (ONLY applied if move is mathematically good)
+        # STRICT PAWN LOGIC
+        # Only praise pawns if they actually do something useful.
         if not narrative and board_before.piece_type_at(move.from_square) == chess.PAWN:
-            narrative.append("Improves pawn structure and takes space.")
+            rank = chess.square_rank(move.to_square)
+            # Center control was already checked above.
+            # Check for advanced pushes or taking space
+            if (board_before.turn == chess.WHITE and rank >= 4) or (board_before.turn == chess.BLACK and rank <= 3):
+                 narrative.append("Takes space and improves structure.")
+            else:
+                # If it's a small push like a3/h3, don't praise it blindly.
+                pass 
 
-    if not narrative: return "A solid positional improvement."
+    if not narrative: return "A quiet positional move."
     return " ".join(narrative)
 
 # --- LOGIC 2: NEGATIVE EXPLANATION (Only for Bad Moves) ---
@@ -84,7 +92,6 @@ def explain_bad_move(board_before, played_move, best_move):
     board_after = board_before.copy()
     board_after.push(played_move)
     if board_after.is_attacked_by(not board_after.turn, played_move.to_square):
-        # Only complain if we moved a valuable piece to death, or if it wasn't a trade
         if not board_before.is_capture(played_move):
             return "Blunder. You moved your piece to a square where it can be captured."
 
@@ -99,7 +106,7 @@ def explain_bad_move(board_before, played_move, best_move):
     if board_before.piece_type_at(played_move.from_square) == chess.PAWN:
         return "Passive pawn play. Neglects development and allows opponent initiative."
 
-    return "Passive play. Allows the opponent to take the initiative or improve their position."
+    return "Passive play. Missed a chance to improve position or create a threat."
 
 # --- LOGIC: ANALYSIS ---
 def get_analysis(board, engine_path):
@@ -113,7 +120,6 @@ def get_analysis(board, engine_path):
     candidates = []
     
     # 1. Identify the BEST move (Benchmark)
-    # info list is usually sorted by Score, so index 0 is best
     if info:
         best_score_raw = info[0]["score"].relative.score(mate_score=10000) or 0
         best_move_obj = info[0]["pv"][0]
@@ -141,10 +147,10 @@ def get_analysis(board, engine_path):
         final_score = (score/100) + bonus
         
         # --- SMART EXPLANATION SELECTOR ---
-        # Calculate how much worse this move is compared to the Engine Best
+        # Compare current move against the best move
         diff = (best_score_raw - score) / 100
         
-        # If the move drops the eval by more than 0.5, it's BAD. Use bad explanation.
+        # Stricter Threshold: >0.5 diff is bad.
         if diff > 0.5:
             explanation_text = explain_bad_move(board, move, best_move_obj)
         else:
@@ -167,15 +173,21 @@ def get_analysis(board, engine_path):
 def judge_move(current_eval, best_eval, board_before, played_move, best_move_obj):
     diff = best_eval - (-current_eval)
     
+    # STRICT DECISION TREE
+    # Thresholds tightened to catch inaccuracies earlier
+    
     if diff <= 0.2:
         return {"label": "✅ Excellent", "color": "green", "text": explain_good_move(board_before, played_move)}
-    elif diff <= 0.7:
+    elif diff <= 0.5: # Lowered from 0.7 to 0.5
         return {"label": "🆗 Good", "color": "blue", "text": explain_good_move(board_before, played_move)}
     elif diff <= 1.5:
+        # Inaccuracy
         return {"label": "⚠️ Inaccuracy", "color": "orange", "text": explain_bad_move(board_before, played_move, best_move_obj)}
     elif diff <= 3.0:
+        # Mistake
         return {"label": "❌ Mistake", "color": "#FF5722", "text": explain_bad_move(board_before, played_move, best_move_obj)}
     else:
+        # Blunder
         return {"label": "😱 Blunder", "color": "red", "text": "Severe Error. You likely hung a piece or missed a forced mate."}
 
 # --- UI START ---
