@@ -1,8 +1,7 @@
-import chess
 from stockfish import Stockfish
 
-# Streamlit Cloud compatible
-STOCKFISH_PATH = "stockfish"
+# Streamlit Cloud installs stockfish via packages.txt
+STOCKFISH_PATH = "/usr/bin/stockfish"
 
 stockfish = Stockfish(
     path=STOCKFISH_PATH,
@@ -16,7 +15,7 @@ stockfish = Stockfish(
 
 def get_candidate_moves(fen, max_moves=8, eval_threshold=-0.5):
     """
-    Use Stockfish ONLY to get safe candidate moves.
+    Use Stockfish ONLY to generate safe candidate moves.
     """
     stockfish.set_fen_position(fen)
     top_moves = stockfish.get_top_moves(max_moves)
@@ -28,6 +27,7 @@ def get_candidate_moves(fen, max_moves=8, eval_threshold=-0.5):
 
         if move is None:
             continue
+
         if cp is not None and cp / 100 < eval_threshold:
             continue
 
