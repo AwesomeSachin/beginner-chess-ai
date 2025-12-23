@@ -1,5 +1,7 @@
 streamlit
 python-chess
-matplotlib
+stockfish
+numpy
 pandas
-plotly
+scikit-learn
+joblib
