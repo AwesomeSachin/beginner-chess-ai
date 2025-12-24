@@ -7,6 +7,19 @@ import tensorflow as tf
 import io
 import os
 
+import os  # Make sure this is imported at the top
+
+@st.cache_resource
+def load_model():
+    # Get the absolute path to the directory where app.py is located
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Construct the full path to the model file
+    model_path = os.path.join(current_dir, 'trap_model.h5')
+    
+    # Load the model using this absolute path
+    return tf.keras.models.load_model(model_path)
+
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Chess Trap Detector", layout="wide")
 
