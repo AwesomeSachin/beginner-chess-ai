@@ -6,7 +6,13 @@ import numpy as np
 import tensorflow as tf
 import io
 import os
-
+st.write("Current Working Directory:", os.getcwd())
+st.write("Files in Current Dir:", os.listdir(os.getcwd()))
+try:
+    st.write("Files in chess-trap-project:", os.listdir("chess-trap-project"))
+except:
+    st.write("Could not find chess-trap-project folder from here.")
+    
 @st.cache_resource
 def load_model():
     # 1. Get the absolute path to the folder where this app.py is running
