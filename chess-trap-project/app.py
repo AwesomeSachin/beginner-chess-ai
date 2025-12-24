@@ -14,27 +14,24 @@ except:
     st.write("Could not find chess-trap-project folder from here.")
     
 @st.cache_resource
+import os
+
+@st.cache_resource
 def load_model():
-    # 1. Get the absolute path to the folder where this app.py is running
-    # This solves the issue of Streamlit Cloud's working directory
-    model_dir = os.path.dirname(os.path.abspath(__file__))
+    # 1. Get the path to the current file (app.py)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
     
-    # 2. Join it with the model filename
-    model_path = os.path.join(model_dir, 'trap_model.h5')
+    # 2. Force the path to be relative to THIS file, not the main terminal
+    model_path = os.path.join(current_dir, 'trap_model.h5')
     
-    # 3. Debugging: Print the path to the logs so we can see it
+    # 3. Debugging: Print where we are looking (this shows in the logs)
     print(f"DEBUG: Looking for model at: {model_path}")
     
-    # 4. Check if file exists
+    # 4. Check if it exists before crashing
     if not os.path.exists(model_path):
-        # Scan the directory to see what IS there (helps debugging)
-        files_in_dir = os.listdir(model_dir)
-        st.error(f"CRITICAL ERROR: Model file not found!")
-        st.error(f"I looked at: {model_path}")
-        st.error(f"Here are the files I actually found in this folder: {files_in_dir}")
+        st.error(f"File missing: {model_path}")
         return None
         
-    # 5. Load using the FULL PATH variable, not the string
     return tf.keras.models.load_model(model_path)
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Chess Trap Detector", layout="wide")
