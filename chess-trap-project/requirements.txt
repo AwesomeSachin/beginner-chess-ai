@@ -1,0 +1,6 @@
+streamlit
+python-chess
+tensorflow
+numpy
+pandas
+stockfish
