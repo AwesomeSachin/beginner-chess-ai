@@ -7,6 +7,33 @@ import tensorflow as tf
 import io
 import os
 
+import os
+
+@st.cache_resource
+def load_model():
+    # 1. Get the current directory of app.py
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # 2. DEBUG: Show us where we are and what is here
+    st.write(f"📂 Current Working Directory: `{current_dir}`")
+    files_in_dir = os.listdir(current_dir)
+    st.write(f"📄 Files found here: `{files_in_dir}`")
+    
+    # 3. Construct the path
+    model_path = os.path.join(current_dir, 'trap_model.h5')
+    
+    # 4. Check if file exists
+    if not os.path.exists(model_path):
+        st.error(f"❌ Error: 'trap_model.h5' was not found in {current_dir}.")
+        return None
+        
+    # 5. Load
+    try:
+        return tf.keras.models.load_model(model_path)
+    except Exception as e:
+        st.error(f"⚠️ File found, but failed to load. It might be corrupt or an LFS pointer. Error: {e}")
+        return None
+
 import os  # Make sure this is imported at the top
 
 @st.cache_resource
