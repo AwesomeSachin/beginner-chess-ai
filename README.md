@@ -78,6 +78,7 @@ I wrote the custom pre-processing pipeline to convert FEN strings into 3D NumPy 
 ---
 
 ## 📂 Repository Structure
+```
 beginner-chess-ai/ 
 │ 
 ├── app.py # The main application file containing UI, Hybrid Logic, and Heuristics 
@@ -85,7 +86,7 @@ beginner-chess-ai/
 ├── packages.txt # Linux-level dependencies (Stockfish installation) 
 ├── requirements.txt # Python dependencies (Streamlit, TensorFlow, Python-Chess) 
 └── README.md # Project documentation
-
+```
 ---
 
 ## 🛡️ License
