@@ -78,3 +78,25 @@ I wrote the custom pre-processing pipeline to convert FEN strings into 3D NumPy 
 ---
 
 ## 📂 Repository Structure
+beginner-chess-ai/ 
+│ 
+├── app.py # The main application file containing UI, Hybrid Logic, and Heuristics 
+├── my_chess_model_v2.keras # The trained Dual-Head CNN model (Saved from Colab) 
+├── packages.txt # Linux-level dependencies (Stockfish installation) 
+├── requirements.txt # Python dependencies (Streamlit, TensorFlow, Python-Chess) 
+└── README.md # Project documentation
+
+---
+
+## 🛡️ License
+
+This project is licensed under the [MIT License](LICENSE). You are free to use, modify, and share this project with proper attribution.
+
+---
+
+## 🌟 About Me
+
+**Sachin chaaudhary**
+*A Data Science & AI Enthusiast passionate about "Explainable AI."*
+
+This project was built to solve the "Black Box" problem in AI chess coaches. By combining deep learning with rule-based verification, I created a system that doesn't just crush you—it teaches you.
