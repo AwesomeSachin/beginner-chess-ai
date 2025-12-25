@@ -1,7 +1,5 @@
 streamlit
 python-chess
-stockfish
+tensorflow
 numpy
-pandas
-scikit-learn
-joblib
+stockfish
