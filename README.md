@@ -46,7 +46,8 @@ This project goes beyond simple model training by solving specific engineering c
 * **[TensorFlow/Keras](https://www.tensorflow.org/):** For building and training the Dual-Head CNN.
 * **[Python-Chess](https://python-chess.readthedocs.io/):** For move generation, validation, and PGN parsing.
 * **[Stockfish 16](https://stockfishchess.org/):** The "Teacher" engine for safety verification.
-* **[Streamlit](https://streamlit.io/):** For the interactive frontend UI and visualization.
+* **[Google Colab](https://colab.research.google.com/drive/1ECfvacFIn7o7KLRfMGHy9aXt6sGJuqyS?usp=sharing/):** Used for GPU-accelerated training of the model.
+* **[Streamlit](https://beginnerchessai.streamlit.app/):** For the interactive frontend UI and visualization.
 * **[Lichess Database](https://database.lichess.org/):** Source of millions of grandmaster games for training.
 * **[NumPy](https://numpy.org/):** For high-performance matrix manipulation of board states.
 
@@ -97,7 +98,7 @@ This project is licensed under the [MIT License](LICENSE). You are free to use, 
 
 ## 🌟 About Me
 
-**Sachin chaaudhary**
+**Sachin chaudhary**
 *A Data Science & AI Enthusiast passionate about "Explainable AI."*
 
 This project was built to solve the "Black Box" problem in AI chess coaches. By combining deep learning with rule-based verification, I created a system that doesn't just crush you—it teaches you.
