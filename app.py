@@ -10,71 +10,55 @@ import base64
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Beginner AI Chess Coach", layout="wide")
 
-# --- LOAD MODEL ---
+# --- LOAD MODEL (V2) ---
 @st.cache_resource
 def load_my_model():
-    try:
-        return tf.keras.models.load_model('my_chess_model.keras')
-    except:
-        return None
+    # Ensure you upload 'my_chess_model_v2.keras'
+    return tf.keras.models.load_model('my_chess_model_v2.keras')
 
-model = load_my_model()
+try:
+    model = load_my_model()
+except:
+    st.error("⚠️ Model file not found. Please upload 'my_chess_model_v2.keras'.")
+    st.stop()
 
-# --- SESSION STATE INITIALIZATION ---
-if 'board' not in st.session_state:
-    st.session_state.board = chess.Board()
+# --- SESSION STATE MANAGEMENT ---
 if 'game_moves' not in st.session_state:
-    st.session_state.game_moves = [] # Stores the list of moves from a PGN
+    st.session_state.game_moves = []  # List of moves in the loaded game
 if 'move_index' not in st.session_state:
-    st.session_state.move_index = 0 # Points to current move in the list
+    st.session_state.move_index = -1  # -1 means start of game (no moves played)
+if 'custom_pgn_loaded' not in st.session_state:
+    st.session_state.custom_pgn_loaded = False
 
-# --- CORE FUNCTIONS ---
+# --- HELPER FUNCTIONS ---
 
-def reset_game():
-    st.session_state.board = chess.Board()
-    st.session_state.game_moves = []
-    st.session_state.move_index = 0
+def get_current_board():
+    """Reconstructs the board based on the current move index."""
+    board = chess.Board()
+    # Play moves up to the current index
+    for i in range(st.session_state.move_index + 1):
+        if i < len(st.session_state.game_moves):
+            board.push(st.session_state.game_moves[i])
+    return board
 
 def load_pgn(pgn_string):
     try:
         pgn = io.StringIO(pgn_string)
         game = chess.pgn.read_game(pgn)
         
-        # 1. Reset board to start
-        st.session_state.board = game.board() 
-        
-        # 2. Store all moves in a list
+        # Reset state
         st.session_state.game_moves = list(game.mainline_moves())
-        
-        # 3. Set index to 0 (Start of game)
-        st.session_state.move_index = 0
-        
-        st.success(f"Game Loaded! ({len(st.session_state.game_moves)} moves)")
-    except Exception as e:
-        st.error(f"Error loading PGN: {e}")
+        st.session_state.move_index = -1 # Start at beginning
+        st.session_state.custom_pgn_loaded = True
+        st.success(f"Game Loaded! Total moves: {len(st.session_state.game_moves)}")
+    except:
+        st.error("Invalid PGN format.")
 
-def go_to_move(index):
-    # Replay the game from start up to the specific index
-    # This ensures the board state is always correct
-    temp_board = chess.Board() # Start fresh
-    
-    # Bound check
-    if index < 0: index = 0
-    if index > len(st.session_state.game_moves): index = len(st.session_state.game_moves)
-    
-    # Replay moves
-    for i in range(index):
-        temp_board.push(st.session_state.game_moves[i])
-    
-    st.session_state.board = temp_board
-    st.session_state.move_index = index
-
-# --- AI LOGIC WITH "SANITY FILTER" ---
+# --- AI ENGINE LOGIC ---
 
 def get_ai_suggestion(board):
-    if model is None: return None
-    
-    # 1. PREPROCESS INPUT (Same as training)
+    """Predicts move using the V2 Dual-Head Model"""
+    # 1. Preprocess Board
     pieces = {'p': 1, 'n': 2, 'b': 3, 'r': 4, 'q': 5, 'k': 6,
               'P': 7, 'N': 8, 'B': 9, 'R': 10, 'Q': 11, 'K': 12}
     foo = []
@@ -88,36 +72,19 @@ def get_ai_suggestion(board):
     matrix_one_hot = (np.arange(13) == matrix[..., None]).astype(np.float32)
     input_data = np.expand_dims(matrix_one_hot, axis=0)
     
-    # 2. GET RAW PREDICTIONS (Probability of "Target Square")
-    prediction = model.predict(input_data, verbose=0)[0]
+    # 2. Get Prediction (Two Heads: From and To)
+    pred = model.predict(input_data, verbose=0)
+    pred_from = pred[0][0] # Probability distribution for Source Square
+    pred_to = pred[1][0]   # Probability distribution for Target Square
     
-    # 3. SCORE LEGAL MOVES (With Heuristics)
-    legal_moves = list(board.legal_moves)
+    # 3. Find Best Legal Move
     best_move = None
-    best_score = -9999
+    best_score = -1
     
-    for move in legal_moves:
-        # Base score from Neural Network
-        score = prediction[move.to_square] * 100 
+    for move in board.legal_moves:
+        # Score = Prob(From) * Prob(To)
+        score = pred_from[move.from_square] * pred_to[move.to_square]
         
-        # --- SANITY FILTERS (Fixing the "Bad Moves") ---
-        
-        # A. Center Control Bonus
-        if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
-            score += 0.5 
-            
-        # B. Capture Bonus (Aggression)
-        if board.is_capture(move):
-            score += 0.3
-            
-        # C. Retreat Penalty (Prevent moving pieces back to start unnecessarily)
-        # If piece moves to back rank (rank 1 for white, 8 for black) and wasn't under attack
-        is_white = board.turn
-        rank = chess.square_rank(move.to_square)
-        if (is_white and rank == 0) or (not is_white and rank == 7):
-            score -= 0.8 # Heavy penalty for retreating to back rank
-
-        # Update Best
         if score > best_score:
             best_score = score
             best_move = move
@@ -125,123 +92,130 @@ def get_ai_suggestion(board):
     return best_move
 
 def explain_move(board, move):
+    """Generates beginner-friendly explanation"""
     explanation = []
-    # Simplified Logic for Beginner Explanation
-    if board.is_capture(move):
-        explanation.append("⚔️ **Capture:** Taking material is often good, but check for traps!")
-    elif move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
-        explanation.append("🎯 **Center Control:** Occupying the middle gives you space.")
-    elif board.gives_check(move):
-        explanation.append("⚠️ **Check:** Force the King to move.")
-    else:
-        explanation.append("💡 **Positional Play:** Improving piece activity.")
     
+    # Phase Detection
+    move_num = board.fullmove_number
+    phase = "Opening" if move_num < 10 else "Middlegame"
+    if move_num > 30: phase = "Endgame"
+    
+    # Logic
+    if phase == "Opening":
+        if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
+            explanation.append("🎯 **Center Control:** Fighting for the high ground.")
+        elif board.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
+             if move.from_square in [chess.B1, chess.G1, chess.B8, chess.G8]: # Only if moving FROM start
+                explanation.append("🦄 **Development:** Good active piece development.")
+        if board.is_castling(move):
+            explanation.append("🏰 **Safety:** King is safe, Rooks are connected.")
+
+    if board.is_capture(move):
+        explanation.append("⚔️ **Capture:** Winning material or trading.")
+    
+    if not explanation:
+        explanation.append(f"💡 **Positional:** {phase} move to improve structure.")
+        
     return " ".join(explanation)
 
 # --- UI LAYOUT ---
 
-st.title("♟️ Hybrid AI Chess Analyst")
+st.title("♟️ AI Chess Tutor (Navigation Fixed)")
 
-# SIDEBAR: CONTROLS
+# Sidebar
 with st.sidebar:
     st.header("Game Controls")
     
-    # PGN Input
-    pgn_input = st.text_area("Paste PGN here:", height=150)
-    if st.button("📂 Load Game"):
-        if pgn_input:
-            load_pgn(pgn_input)
+    # Navigation Buttons
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("⏪ Start"):
+            st.session_state.move_index = -1
             st.rerun()
-        else:
-            reset_game()
+        if st.button("⬅️ Prev"):
+            if st.session_state.move_index >= 0:
+                st.session_state.move_index -= 1
+                st.rerun()
+    with c2:
+        if st.button("Next ➡️"):
+            if st.session_state.move_index < len(st.session_state.game_moves) - 1:
+                st.session_state.move_index += 1
+                st.rerun()
+        if st.button("End ⏩"):
+            st.session_state.move_index = len(st.session_state.game_moves) - 1
             st.rerun()
             
     st.markdown("---")
-    st.write("**Navigation**")
-    
-    col_nav1, col_nav2, col_nav3, col_nav4 = st.columns(4)
-    
-    with col_nav1:
-        if st.button("⏮️ Start"):
-            go_to_move(0)
-            st.rerun()
-    with col_nav2:
-        if st.button("⬅️ Prev"):
-            go_to_move(st.session_state.move_index - 1)
-            st.rerun()
-    with col_nav3:
-        if st.button("Next ➡️"):
-            go_to_move(st.session_state.move_index + 1)
-            st.rerun()
-    with col_nav4:
-        if st.button("End ⏭️"):
-            go_to_move(len(st.session_state.game_moves))
-            st.rerun()
+    pgn_input = st.text_area("Paste PGN here:")
+    if st.button("Load PGN"):
+        load_pgn(pgn_input)
+        st.rerun()
+        
+    if st.button("Reset Analysis"):
+        st.session_state.game_moves = []
+        st.session_state.move_index = -1
+        st.session_state.custom_pgn_loaded = False
+        st.rerun()
 
-    st.write(f"Move: **{st.session_state.move_index} / {len(st.session_state.game_moves)}**")
+# --- MAIN DISPLAY ---
 
-# MAIN DISPLAY
+# 1. Get Board State
+board = get_current_board()
+
+# 2. Get AI Suggestion (Only if game is not over)
+suggested_move = None
+if not board.is_game_over():
+    suggested_move = get_ai_suggestion(board)
+
 col1, col2 = st.columns([1.5, 1])
 
-# Run AI Analysis
-suggested_move = get_ai_suggestion(st.session_state.board)
-
 with col1:
-    # Draw Arrows
+    # Draw Board with Arrow
     arrows = []
     if suggested_move:
-        # Blue arrow for AI suggestion
-        arrows.append(chess.svg.Arrow(suggested_move.from_square, suggested_move.to_square, color="#0000ccaa"))
-    
-    # Last move arrow (Yellow)
-    if len(st.session_state.board.move_stack) > 0:
-        last_move = st.session_state.board.peek()
-        arrows.append(chess.svg.Arrow(last_move.from_square, last_move.to_square, color="#ffcc00aa"))
+        arrows.append(chess.svg.Arrow(suggested_move.from_square, suggested_move.to_square, color="#0000cccc"))
+        
+    # Highlight last move played
+    last_move = None
+    if st.session_state.move_index >= 0 and st.session_state.game_moves:
+        last_move = st.session_state.game_moves[st.session_state.move_index]
 
-    # Render Board
     board_svg = chess.svg.board(
-        board=st.session_state.board, 
+        board=board, 
         arrows=arrows,
-        size=550
+        lastmove=last_move,
+        size=500
     )
     st.image(f"data:image/svg+xml;base64,{base64.b64encode(board_svg.encode('utf-8')).decode('utf-8')}")
 
 with col2:
-    st.subheader("🧠 Model Analysis")
+    st.subheader(f"Move: {st.session_state.move_index + 1}")
     
-    # Status
-    turn_text = "White to Move" if st.session_state.board.turn else "Black to Move"
-    st.caption(turn_text)
+    # Show PGN Navigation status
+    if st.session_state.custom_pgn_loaded:
+        st.info("📂 Reviewing Loaded Game")
+    else:
+        st.info("🆕 Free Analysis Mode")
 
+    # AI Output
     if suggested_move:
-        st.success(f"**Best Move:** {suggested_move.uci()}")
-        st.markdown(explain_move(st.session_state.board, suggested_move))
+        st.success(f"**AI Suggests:** {suggested_move.uci()}")
+        reason = explain_move(board, suggested_move)
+        st.markdown(reason)
         
-        # 'Play Suggested' Button (Only works if we are at the end of current history or in free play)
-        if st.button(f"▶️ Play {suggested_move.uci()}"):
-            st.session_state.board.push(suggested_move)
-            # If we were analyzing a historical game, playing a new move branches off
-            # So we effectively clear the 'future' moves
-            st.session_state.game_moves = st.session_state.game_moves[:st.session_state.move_index] + [suggested_move]
+        # Play Button (Only works in Free Analysis mode usually, but allowed here)
+        if st.button(f"Play {suggested_move.uci()}"):
+            # If we are in "Free Analysis" mode (no PGN loaded), we append to history
+            st.session_state.game_moves.append(suggested_move)
             st.session_state.move_index += 1
             st.rerun()
             
-    else:
-        if st.session_state.board.is_game_over():
-            st.error(f"Game Over: {st.session_state.board.result()}")
-        else:
-            st.warning("Model loading or no moves found.")
-
-    st.markdown("---")
-    st.write("### Playable Moves")
-    # Grid of playable moves
-    legal_moves = [m.uci() for m in st.session_state.board.legal_moves]
-    cols = st.columns(4)
-    for i, move_uci in enumerate(legal_moves):
-        if cols[i % 4].button(move_uci, key=move_uci):
-            move = chess.Move.from_uci(move_uci)
-            st.session_state.board.push(move)
-             # Update history branch
-            st.session_state.game_moves = st.session_state.game_moves[:st.session_state.move_index] + [move]
-            st.session_state.move_index += 1
-            st.rerun()
+    # Show History (Last 5 moves)
+    st.write("---")
+    st.write("**Recent Moves:**")
+    history_text = ""
+    start_idx = max(0, st.session_state.move_index - 4)
+    for i in range(start_idx, st.session_state.move_index + 1):
+        move_san = st.session_state.game_moves[i]
+        history_text += f"{i+1}. {move_san}  \n"
+    st.text(history_text)
