@@ -1,18 +1,19 @@
-# Deep Logic Chess: An Explainable AI (XAI) Project
+# Beginner AI Chess Coach: A Hybrid Neuro-Symbolic Engine
 
-Welcome to the **Deep Logic Chess** repository! ♟️  
-This project demonstrates a **hybrid Machine Learning and Heuristic AI** solution designed to teach chess to beginners. Unlike traditional engines that simply calculate the "best" move, this system uses a trained Logistic Regression model to **rank moves based on human learnability** and generates natural language explanations (XAI) for every decision.
+Welcome to the **Beginner AI Chess Coach** repository! 🚀  
+This project demonstrates a **Hybrid AI** solution that combines the raw calculation power of Stockfish with the intuition of a Deep Learning Neural Network. Unlike traditional engines that simply calculate the "best" move, this AI is designed to teach beginners by suggesting natural, human-like moves and explaining the *strategic principles* behind them.
 
 ---
 
-## 🧠 System Architecture
+## 🏗️ System Architecture
 
-The architecture follows a **Generator-Discriminator** pattern enhanced with an XAI (Explainable AI) layer:
+The architecture follows a **Hybrid Teacher-Student** workflow:
 
-1. **Candidate Generation (Stockfish)**: The raw calculation engine generates the top legal moves based on deep search.
-2. **Feature Engineering Layer**: Extract cognitive features relevant to beginners (e.g., *Is this a check?*, *Does this control the center?*, *Is it a tactical capture?*).
-3. **ML Ranking Model**: A trained **Logistic Regression** classifier (trained on 20,000+ Lichess games) assigns a "Learnability Score" to re-rank moves.
-4. **Narrative Engine**: Translates the board state and move logic into "Gotham-style" natural language feedback.
+1.  **Data Ingestion Layer**: Raw game data (PGN) is streamed from the [Lichess Open Database](https://database.lichess.org/), parsed into move sequences, and converted into 8x8x13 **Bitboard Tensors**.
+2.  **Deep Learning Model (The Student)**: A Custom Convolutional Neural Network (CNN) trained to mimic human move patterns (intuition).
+3.  **Validation Layer (The Teacher)**: Stockfish 16 acts as a gatekeeper, filtering out blunders to ensure the AI only suggests "safe" moves.
+4.  **Heuristic Logic Layer**: A rule-based system that interprets the board state to generate natural language explanations (e.g., "Control the Center," "Develop Knights").
+5.  **Application Layer**: A Streamlit web interface for interactive analysis.
 
 ---
 
@@ -20,89 +21,50 @@ The architecture follows a **Generator-Discriminator** pattern enhanced with an 
 
 This project involves:
 
-1. **Big Data Engineering**: Streaming and processing over **500,000 moves** from the Lichess Open Database to create a custom training dataset.
-2. **Machine Learning**: Training a supervised model to quantify the importance of Tactical vs. Positional play for <1500 Elo players.
-3. **Software Engineering**: Building a responsive, state-aware web application using **Streamlit**.
-4. **Explainable AI (XAI)**: Converting complex engine evaluations into instant, color-coded feedback (e.g., "Mistake: Missed a tactical capture").
+1.  **Data Engineering**: Building a pipeline to process complex PGN files and convert chess positions into machine-readable tensors.
+2.  **Deep Learning (CNN)**: Designing and training a Dual-Head Neural Network to predict both *Source* and *Target* squares.
+3.  **Hybrid Logic Integration**: merging rule-based engines (Stockfish) with probabilistic models (Neural Networks).
+4.  **UI/UX Development**: Creating an interactive coaching interface that supports PGN loading, move visualization (arrows), and manual play.
 
-🎯 **Why this matters:** Standard engines are "Black Boxes"—they give you the answer but not the *why*. This project bridges the gap between raw calculation and human understanding.
-
----
-
-## 🛠️ Important Links & Tools:
-
-- **[Live Demo App](https://beginnerchessai.streamlit.app/):** Interact with the live AI.
-- **[Google Colab Notebook](https://colab.research.google.com/drive/1C2gJaQZedg_ivRwI6jVpdt47uuQp5l4G?usp=sharing):** View the full training pipeline, data extraction, and model evaluation code.
-- **[Lichess Open Database](https://database.lichess.org/):** The source of the 20,000 beginner games used for training.
-- **[Stockfish Engine](https://stockfishchess.org/):** The backend calculation engine.
-- **[Streamlit Documentation](https://docs.streamlit.io/):** The framework used for the frontend UI.
+🎯 **Target Audience**: Beginners looking to understand *why* a move is good, rather than just memorizing lines.
 
 ---
 
-## 🚀 Project Requirements
+## 🛠️ Tech Stack & Tools
 
-### 1. Data Pipeline & Machine Learning
-#### Objective
-To prove mathematically that beginner players benefit more from tactical simplicity than deep positional play.
-
-#### Specifications
-- **Data Source**: Lichess PGN Stream (Filtered for Elo < 1500).
-- **Feature Extraction**: Extracted features: `Is_Check`, `Is_Capture`, `Center_Control`, `Queen_Movement`.
-- **Model**: Logistic Regression.
-- **Results**: Discovered that **Checks (w=0.57)** are 15x more weighted than **Center Control (w=0.03)** for beginner wins.
-
-### 2. Application Development (The "Deep Logic" Engine)
-#### Objective
-Develop a UI that provides instant, context-aware feedback on every move without crashing or losing state.
-
-#### Features implemented
-- **Auto-Sync Logic**: Seamlessly handles deviations from loaded PGN games.
-- **Visual Arrows**: Automatically visualizes the engine's plan on the board.
-- **Move Classification**: Instantly labels moves as "Brilliant", "Good", "Inaccuracy", or "Blunder".
-- **Natural Language Generation**: Generates explanations like *"Captures the Bishop"* or *"Escapes a threat"* instead of raw numbers.
+* **[Python 3.10+](https://www.python.org/):** Core logic and scripting.
+* **[TensorFlow / Keras](https://www.tensorflow.org/):** Building and training the Convolutional Neural Network.
+* **[Streamlit](https://streamlit.io/):** Interactive web application framework.
+* **[Stockfish](https://stockfishchess.org/):** Open-source chess engine used for move validation.
+* **[Python-Chess](https://python-chess.readthedocs.io/):** Library for move generation, validation, and PGN handling.
+* **[Google Colab](https://colab.research.google.com/):** Cloud environment used for training the model on the Lichess dataset.
+* **[NumPy](https://numpy.org/):** Matrix operations for board representation.
 
 ---
 
-## 📊 Analytics & Insights
+## 🚀 Project Details & "My Input"
 
-The project includes generated reports proving the model's efficacy:
+### 1. Data Engineering (My Contribution)
+Instead of using a pre-cleaned CSV, I built a custom data pipeline:
+* **Source:** Streamed compressed PGN data from Lichess (ZStandard compression).
+* **Transformation:** Converted FEN strings into **One-Hot Encoded Matrices** (8x8x13).
+    * *Why 13 channels?* 6 piece types for White + 6 for Black + 1 for Empty squares.
+* **Scale:** Processed ~2,000 high-quality games to extract move patterns.
 
-- **Feature Importance Graph**: Shows the learned weights of different chess concepts.
-- **Confusion Matrix**: Evaluates the accuracy of the model in predicting winning moves.
-- **Complexity Comparison**: Demonstrates how the "Deep Logic" filter reduces the cognitive load compared to raw Stockfish.
+### 2. The Model Architecture (The "Brain")
+I designed a **Dual-Head CNN** to solve the unique problem of chess moves:
+* **Input:** 8x8x13 Board Representation.
+* **Hidden Layers:** 2x Convolutional Layers (64 & 128 filters) + BatchNormalization + Relu Activation.
+* **Output Head 1:** Softmax distribution (64 units) for the **From Square**.
+* **Output Head 2:** Softmax distribution (64 units) for the **To Square**.
+* **Rationale:** Splitting the prediction allows the model to learn *piece selection* and *destination logic* independently.
+
+### 3. The Hybrid Logic (The "Innovation")
+A raw neural network often makes illegal or "blundering" moves. To solve this, I implemented a **Teacher-Student Filter**:
+* **Step 1:** Stockfish generates the top 5 *technically safe* moves.
+* **Step 2:** My Neural Network evaluates those 5 moves and picks the one with the highest "Human Probability" score.
+* **Result:** The engine plays safely (thanks to Stockfish) but in a human style (thanks to the Neural Network).
 
 ---
 
 ## 📂 Repository Structure
-
-```text
-deep-logic-chess/
-│
-├── .streamlit/
-│   └── config.toml             # UI configuration (Theme, Wide Mode)
-│
-├── assets/                     # Generated graphs and visuals
-│   ├── graph1_feature_imp.png  # Feature Importance Bar Chart
-│   ├── graph2_confusion.png    # Model Confusion Matrix
-│   └── graph3_complexity.png   # Complexity Comparison Graph
-│
-├── data/                       # Data processing files
-│   ├── lichess_beginner.csv    # The extracted dataset (sample)
-│   └── train_model.py          # Script used to train the ML model
-│
-├── src/                        # Source code
-│   └── app.py                  # MAIN APPLICATION CODE (Streamlit + Logic)
-│
-├── requirements.txt            # Python dependencies (streamlit, chess, scikit-learn)
-├── packages.txt                # System dependencies (stockfish)
-├── runtime.txt                 # Python runtime version
-├── README.md                   # Project documentation
-└── LICENSE                     # MIT License
-
-
-## 🛡️ License
-
-This project is licensed under the [MIT License](LICENSE). You are free to use, modify, and share this project with proper attribution.
-
-## 🌟 About Me
-I'm Sachin Choudhary Machine Learning Enthusiast & Data Analysist I built this project to solve the frustration beginners face when using professional chess engines. By combining Big Data analysis with Game Theory, I created an engine that speaks the language of the player.
