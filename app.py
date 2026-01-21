@@ -13,6 +13,7 @@ import os
 st.set_page_config(page_title="Beginner AI Chess Coach", layout="wide")
 
 # --- PATH TO STOCKFISH ---
+# Adjust path if needed. On Streamlit Cloud, this is usually correct.
 STOCKFISH_PATH = "/usr/games/stockfish"
 
 # --- LOAD YOUR MODEL ---
@@ -43,33 +44,44 @@ def get_stockfish_engine():
         st.error(f"Stockfish engine not found. Ensure it is installed in packages.txt.")
         return None
 
-# --- HELPER 2: HYBRID PREDICTION (UPDATED WITH KILLER INSTINCT) ---
+# --- HELPER 2: HYBRID PREDICTION (FIXED KILLER INSTINCT) ---
 def predict_move_hybrid(board):
     """
-    1. Check for Forced Mate (Killer Instinct).
+    1. Check for Forced Mate (Killer Instinct) - ROBUST VERSION
     2. If no mate, get Top 5 Safe Moves.
     3. Use Neural Network to pick the most instructive safe move.
     """
     engine = get_stockfish_engine()
     if not engine: return None
 
-    # 1. Ask Stockfish for analysis (Time: 0.1s is enough for simple mates)
+    # 1. Ask Stockfish for analysis
     limit = chess.engine.Limit(time=0.1)
     result = engine.analyse(board, limit, multipv=5)
     engine.quit()
     
-    # --- NEW: KILLER INSTINCT LOGIC ---
-    # Scan results for a forced checkmate in favor of the current player
+    # --- KILLER INSTINCT LOGIC (FIXED) ---
     for info in result:
-        if "score" in info and info["score"].is_mate():
-            mate_turns = info["score"].mate()
-            # mate_turns > 0 means WE are mating the opponent
-            if mate_turns > 0:
-                return info["pv"][0]  # PLAY THE MATE IMMEDIATELY!
+        if "score" in info:
+            score = info["score"]
+            # Check if it's a mate score
+            if score.is_mate():
+                # SAFELY get the mate number (Handle different library versions)
+                mate_turns = None
+                
+                # Method A: Direct access (Newer versions)
+                if hasattr(score, "mate"):
+                    mate_turns = score.mate()
+                # Method B: Relative access (Older versions)
+                elif hasattr(score, "relative") and hasattr(score.relative, "mate"):
+                    mate_turns = score.relative.mate()
+                
+                # Logic: If mate_turns is positive (>0), it means WE are winning.
+                # If it's negative, we are losing (don't force a move that gets us mated, though stockfish avoids that anyway)
+                if mate_turns is not None and mate_turns > 0:
+                    return info["pv"][0]  # PLAY THE WINNING MOVE!
+    # -------------------------------------
 
-    # ----------------------------------
-
-    # If no mate, proceed with Hybrid Selection
+    # If no immediate mate, proceed with Hybrid Selection
     top_moves = [info["pv"][0] for info in result if "pv" in info]
     
     if not top_moves: return None
@@ -210,6 +222,7 @@ suggested_move = None
 continuation_str = ""
 
 if not board.is_game_over():
+    # RUN THE FIXED AI LOGIC
     suggested_move = predict_move_hybrid(board)
     if suggested_move:
         continuation_str = get_continuation(board, depth=3)
