@@ -13,11 +13,9 @@ import os
 st.set_page_config(page_title="Beginner AI Chess Coach", layout="wide")
 
 # --- PATH TO STOCKFISH ---
-# Adjust this if you are running locally on Windows (e.g., r"C:\stockfish\stockfish.exe")
-# For Streamlit Cloud (Linux), this default usually works if installed via packages.txt
 STOCKFISH_PATH = "/usr/games/stockfish"
 
-# --- LOAD YOUR NEURAL NETWORK ---
+# --- LOAD YOUR MODEL ---
 @st.cache_resource
 def load_my_model():
     return tf.keras.models.load_model('my_chess_model_v2.keras')
@@ -45,25 +43,39 @@ def get_stockfish_engine():
         st.error(f"Stockfish engine not found. Ensure it is installed in packages.txt.")
         return None
 
-# --- HELPER 2: HYBRID PREDICTION (The "Brain") ---
+# --- HELPER 2: HYBRID PREDICTION (UPDATED WITH KILLER INSTINCT) ---
 def predict_move_hybrid(board):
     """
-    1. Stockfish gets top 5 SAFE moves.
-    2. Neural Network picks the most HUMAN/Instructive one.
+    1. Check for Forced Mate (Killer Instinct).
+    2. If no mate, get Top 5 Safe Moves.
+    3. Use Neural Network to pick the most instructive safe move.
     """
     engine = get_stockfish_engine()
     if not engine: return None
 
-    # 1. Stockfish filters blunders (Time limit 0.1s)
-    result = engine.analyse(board, chess.engine.Limit(time=0.1), multipv=5)
+    # 1. Ask Stockfish for analysis (Time: 0.1s is enough for simple mates)
+    limit = chess.engine.Limit(time=0.1)
+    result = engine.analyse(board, limit, multipv=5)
     engine.quit()
     
+    # --- NEW: KILLER INSTINCT LOGIC ---
+    # Scan results for a forced checkmate in favor of the current player
+    for info in result:
+        if "score" in info and info["score"].is_mate():
+            mate_turns = info["score"].mate()
+            # mate_turns > 0 means WE are mating the opponent
+            if mate_turns > 0:
+                return info["pv"][0]  # PLAY THE MATE IMMEDIATELY!
+
+    # ----------------------------------
+
+    # If no mate, proceed with Hybrid Selection
     top_moves = [info["pv"][0] for info in result if "pv" in info]
     
     if not top_moves: return None
-    if len(top_moves) == 1: return top_moves[0] # Only one good move
+    if len(top_moves) == 1: return top_moves[0] 
 
-    # 2. Neural Network Evaluates "Style"
+    # Prepare Data for Neural Network
     pieces = {'p': 1, 'n': 2, 'b': 3, 'r': 4, 'q': 5, 'k': 6,
               'P': 7, 'N': 8, 'B': 9, 'R': 10, 'Q': 11, 'K': 12}
     foo = []
@@ -85,7 +97,6 @@ def predict_move_hybrid(board):
     best_hybrid_score = -1
 
     for move in top_moves:
-        # Score = Probability NN assigns to this safe move
         score = pred_from[move.from_square] * pred_to[move.to_square]
         if score > best_hybrid_score:
             best_hybrid_score = score
@@ -111,6 +122,12 @@ def explain_move(board, move):
     explanation = []
     phase = "Opening" if board.fullmove_number < 10 else "Middlegame"
     
+    # Check for Checkmate first
+    temp_board = board.copy()
+    temp_board.push(move)
+    if temp_board.is_checkmate():
+        return "🏆 **Checkmate:** This move wins the game immediately!"
+
     if phase == "Opening":
         if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
             explanation.append("🎯 **Center Control:** Taking the high ground.")
@@ -123,6 +140,9 @@ def explain_move(board, move):
     if board.is_capture(move):
         explanation.append("⚔️ **Capture:** A safe material gain or trade.")
     
+    if board.gives_check(move):
+        explanation.append("⚠️ **Check:** Forcing the King to move.")
+
     if not explanation:
         explanation.append(f"💡 **Positional:** Improving piece activity and structure.")
         
@@ -147,11 +167,10 @@ def load_pgn(pgn_string):
     except:
         st.error("Invalid PGN.")
 
-# --- SIDEBAR UI (The Left Side System) ---
+# --- SIDEBAR UI ---
 with st.sidebar:
     st.header("🎮 Game Controls")
     
-    # Navigation Buttons
     c1, c2 = st.columns(2)
     with c1:
         if st.button("⏪ Start"):
@@ -172,7 +191,7 @@ with st.sidebar:
             
     st.markdown("---")
     st.subheader("📋 Load Game")
-    pgn_input = st.text_area("Paste PGN here (Lichess/Chess.com):", height=100)
+    pgn_input = st.text_area("Paste PGN here:", height=100)
     if st.button("📥 Load PGN"):
         load_pgn(pgn_input)
         st.rerun()
@@ -190,7 +209,6 @@ board = get_current_board()
 suggested_move = None
 continuation_str = ""
 
-# AI Calculation (Only if active game)
 if not board.is_game_over():
     suggested_move = predict_move_hybrid(board)
     if suggested_move:
@@ -199,7 +217,6 @@ if not board.is_game_over():
 col1, col2 = st.columns([1.5, 1])
 
 with col1:
-    # Draw Board with Arrows
     arrows = []
     if suggested_move:
         arrows.append(chess.svg.Arrow(suggested_move.from_square, suggested_move.to_square, color="#0000cccc"))
@@ -240,7 +257,6 @@ with col2:
     st.write("---")
     st.write("**Manual Play (Click to move):**")
     
-    # Manual Buttons Grid
     legal_moves = [m for m in board.legal_moves]
     cols = st.columns(4)
     for i, move in enumerate(legal_moves):
@@ -250,7 +266,6 @@ with col2:
             st.session_state.move_index += 1
             st.rerun()
 
-# --- HISTORY ---
 st.write("---")
 st.subheader("📜 History")
 hist_board = chess.Board()
