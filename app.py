@@ -42,7 +42,43 @@ def get_stockfish_engine():
     except:
         return None
 
-# --- HELPER 2: HYBRID PREDICTION (With Killer Instinct) ---
+# --- NEW: MOVE QUALITY ANALYZER (Blunder/Best/Etc.) ---
+def analyze_move_quality(board_before, move_played):
+    """
+    Compares the 'Best Move' score vs 'Played Move' score to assign a label.
+    """
+    engine = get_stockfish_engine()
+    if not engine: return "N/A", "grey"
+
+    # 1. Get score of the Best Possible Move
+    limit = chess.engine.Limit(time=0.1)
+    best_info = engine.analyse(board_before, limit)
+    best_score_val = best_info["score"].relative.score(mate_score=10000)
+    
+    # 2. Get score of the Move Actually Played
+    # We restrict search to ONLY the move played
+    played_info = engine.analyse(board_before, limit, root_moves=[move_played])
+    played_score_val = played_info["score"].relative.score(mate_score=10000)
+    
+    engine.quit()
+
+    # 3. Calculate Difference (Centipawns)
+    # Note: If best_score is mate, numbers are huge (10000). 
+    diff = best_score_val - played_score_val
+
+    # 4. Assign Label
+    if diff < 15:
+        return "🌟 Best Move", "green"
+    elif diff < 50:
+        return "✅ Good Move", "blue" # Slightly inferior but fine
+    elif diff < 100:
+        return "⚠️ Inaccuracy", "orange" # Noticeable drop
+    elif diff < 250:
+        return "❌ Mistake", "orange" # Bad
+    else:
+        return "💀 Blunder", "red" # Game losing
+
+# --- HELPER 2: HYBRID PREDICTION ---
 def predict_move_hybrid(board):
     engine = get_stockfish_engine()
     if not engine: return None
@@ -52,21 +88,19 @@ def predict_move_hybrid(board):
     result = engine.analyse(board, limit, multipv=5)
     engine.quit()
     
-    # 2. Check for Forced Mate (Killer Instinct)
+    # 2. Killer Instinct (Mate)
     for info in result:
-        if "score" in info:
-            score = info["score"]
-            if score.is_mate():
-                # Handle version differences safely
-                mate_turns = None
-                if hasattr(score, "mate"): mate_turns = score.mate()
-                elif hasattr(score, "relative") and hasattr(score.relative, "mate"): mate_turns = score.relative.mate()
-                
-                # If mate is positive, WE win. Play it.
-                if mate_turns is not None and mate_turns > 0:
-                    return info["pv"][0]
+        if "score" in info and info["score"].is_mate():
+            # Handle version differences
+            mate_turns = None
+            if hasattr(info["score"], "mate"): mate_turns = info["score"].mate()
+            elif hasattr(info["score"], "relative") and hasattr(info["score"].relative, "mate"): 
+                mate_turns = info["score"].relative.mate()
+            
+            if mate_turns is not None and mate_turns > 0:
+                return info["pv"][0]
 
-    # 3. Hybrid Selection (Neural Net + Stockfish)
+    # 3. Hybrid Selection
     top_moves = [info["pv"][0] for info in result if "pv" in info]
     if not top_moves: return None
     if len(top_moves) == 1: return top_moves[0] 
@@ -115,33 +149,23 @@ def get_continuation(board, depth=3):
     return " -> ".join(sequence)
 
 def explain_move(board, move):
-    """Generates text explanation for a move."""
+    """Generates heuristic text explanation."""
     explanation = []
-    
-    # 1. Check Special Cases
     temp_board = board.copy()
     temp_board.push(move)
-    if temp_board.is_checkmate():
-        return "🏆 **Checkmate:** Wins the game immediately!"
+    if temp_board.is_checkmate(): return "🏆 **Checkmate:** Wins the game immediately!"
     
-    # 2. Heuristics
     if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
-        explanation.append("🎯 **Center Control:** Occupying the center.")
+        explanation.append("🎯 **Center:** Controls key central squares.")
     elif board.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
-        # --- FIXED INDENTATION HERE ---
         if move.from_square in [chess.B1, chess.G1, chess.B8, chess.G8]:
-            explanation.append("🦄 **Development:** Activating a minor piece.")
+            explanation.append("🦄 **Development:** Improves piece activity.")
     
-    if board.is_castling(move):
-        explanation.append("🏰 **King Safety:** Castling to safety.")
-    if board.is_capture(move):
-        explanation.append("⚔️ **Capture:** Taking material.")
-    if board.gives_check(move):
-        explanation.append("⚠️ **Check:** Attacking the King.")
+    if board.is_castling(move): explanation.append("🏰 **Safety:** Protects the King.")
+    if board.is_capture(move): explanation.append("⚔️ **Capture:** Wins material.")
+    if board.gives_check(move): explanation.append("⚠️ **Check:** Forces opponent to react.")
 
-    if not explanation:
-        explanation.append(f"💡 **Solid Move:** Improving position.")
-        
+    if not explanation: explanation.append(f"💡 **Positional:** Improves structure.")
     return " ".join(explanation)
 
 # --- HELPER 4: NAVIGATION & PGN ---
@@ -153,9 +177,7 @@ def get_current_board():
     return board
 
 def get_previous_board():
-    """Gets board state BEFORE the last move was played"""
     board = chess.Board()
-    # Go up to index - 1
     for i in range(st.session_state.move_index):
         if i < len(st.session_state.game_moves):
             board.push(st.session_state.game_moves[i])
@@ -174,7 +196,7 @@ def load_pgn(pgn_string):
 
 # --- SIDEBAR UI ---
 with st.sidebar:
-    st.header("🎮 Game Controls")
+    st.header("🎮 Controls")
     c1, c2 = st.columns(2)
     with c1:
         if st.button("⏪ Start"):
@@ -198,7 +220,7 @@ with st.sidebar:
     if st.button("📥 Load PGN"):
         load_pgn(pgn_input)
         st.rerun()
-    if st.button("🗑️ Reset Board"):
+    if st.button("🗑️ Reset"):
         st.session_state.game_moves = []
         st.session_state.move_index = -1
         st.session_state.custom_pgn_loaded = False
@@ -231,27 +253,29 @@ with col1:
     st.image(f"data:image/svg+xml;base64,{base64.b64encode(board_svg.encode('utf-8')).decode('utf-8')}")
 
 with col2:
-    # --- FEEDBACK ON LAST MOVE ---
+    # --- EVALUATION PANEL ---
     if st.session_state.move_index >= 0:
         last_played_move = st.session_state.game_moves[st.session_state.move_index]
-        prev_board = get_previous_board() # State before the move
+        prev_board = get_previous_board() 
         
-        # Explain what just happened
+        # 1. Get Classification (Blunder/Best/Mistake)
+        label, color = analyze_move_quality(prev_board, last_played_move)
+        
+        # 2. Get Explanation
         feedback = explain_move(prev_board, last_played_move)
         
-        st.info(f"**📜 Last Move:** {prev_board.san(last_played_move)}")
-        st.markdown(f"> *{feedback}*")
+        # Display
+        st.markdown(f"### Last Move: :{color}[{label}]")
+        st.info(f"**Move:** {prev_board.san(last_played_move)} \n\n {feedback}")
         st.divider()
-    # -----------------------------
+    # -----------------------
 
-    st.subheader("🤖 AI Suggestion (Next Move)")
+    st.subheader("🤖 AI Suggestion")
     
     if suggested_move:
         st.success(f"**Best Move:** {suggested_move.uci()}")
         st.caption(f"🔮 Line: {continuation_str}")
-        
-        reason = explain_move(board, suggested_move)
-        st.write(f"**Why?** {reason}")
+        st.write(f"**Why?** {explain_move(board, suggested_move)}")
         
         if st.button(f"▶️ Play {board.san(suggested_move)}"):
             st.session_state.game_moves = st.session_state.game_moves[:st.session_state.move_index+1]
@@ -276,12 +300,4 @@ with col2:
             st.rerun()
 
 st.divider()
-st.subheader("📜 History")
-hist_board = chess.Board()
-history_text = []
-for i, m in enumerate(st.session_state.game_moves):
-    move_str = hist_board.san(m)
-    hist_board.push(m)
-    if i % 2 == 0: history_text.append(f"**{(i//2)+1}.** {move_str}")
-    else: history_text[-1] += f" {move_str}"
-st.text(" ".join(history_text))
+st.text("History: " + " ".join([chess.Board().san(m) for m in st.session_state.game_moves]))
