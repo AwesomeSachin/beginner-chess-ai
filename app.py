@@ -128,8 +128,10 @@ def explain_move(board, move):
     if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
         explanation.append("🎯 **Center Control:** Occupying the center.")
     elif board.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
-            if move.from_square in [chess.B1, chess.G1, chess.B8, chess.G8]:
+        # --- FIXED INDENTATION HERE ---
+        if move.from_square in [chess.B1, chess.G1, chess.B8, chess.G8]:
             explanation.append("🦄 **Development:** Activating a minor piece.")
+    
     if board.is_castling(move):
         explanation.append("🏰 **King Safety:** Castling to safety.")
     if board.is_capture(move):
@@ -229,7 +231,7 @@ with col1:
     st.image(f"data:image/svg+xml;base64,{base64.b64encode(board_svg.encode('utf-8')).decode('utf-8')}")
 
 with col2:
-    # --- NEW FEATURE: FEEDBACK ON LAST MOVE ---
+    # --- FEEDBACK ON LAST MOVE ---
     if st.session_state.move_index >= 0:
         last_played_move = st.session_state.game_moves[st.session_state.move_index]
         prev_board = get_previous_board() # State before the move
@@ -240,7 +242,7 @@ with col2:
         st.info(f"**📜 Last Move:** {prev_board.san(last_played_move)}")
         st.markdown(f"> *{feedback}*")
         st.divider()
-    # ------------------------------------------
+    # -----------------------------
 
     st.subheader("🤖 AI Suggestion (Next Move)")
     
