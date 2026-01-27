@@ -13,10 +13,9 @@ import os
 st.set_page_config(page_title="Beginner AI Chess Coach", layout="wide")
 
 # --- PATH TO STOCKFISH ---
-# Adjust path if needed. On Streamlit Cloud, this is usually correct.
 STOCKFISH_PATH = "/usr/games/stockfish"
 
-# --- LOAD YOUR MODEL ---
+# --- LOAD MODEL ---
 @st.cache_resource
 def load_my_model():
     return tf.keras.models.load_model('my_chess_model_v2.keras')
@@ -41,16 +40,10 @@ def get_stockfish_engine():
         path = STOCKFISH_PATH if os.path.exists(STOCKFISH_PATH) else "stockfish"
         return chess.engine.SimpleEngine.popen_uci(path)
     except:
-        st.error(f"Stockfish engine not found. Ensure it is installed in packages.txt.")
         return None
 
-# --- HELPER 2: HYBRID PREDICTION (FIXED KILLER INSTINCT) ---
+# --- HELPER 2: HYBRID PREDICTION (With Killer Instinct) ---
 def predict_move_hybrid(board):
-    """
-    1. Check for Forced Mate (Killer Instinct) - ROBUST VERSION
-    2. If no mate, get Top 5 Safe Moves.
-    3. Use Neural Network to pick the most instructive safe move.
-    """
     engine = get_stockfish_engine()
     if not engine: return None
 
@@ -59,35 +52,26 @@ def predict_move_hybrid(board):
     result = engine.analyse(board, limit, multipv=5)
     engine.quit()
     
-    # --- KILLER INSTINCT LOGIC (FIXED) ---
+    # 2. Check for Forced Mate (Killer Instinct)
     for info in result:
         if "score" in info:
             score = info["score"]
-            # Check if it's a mate score
             if score.is_mate():
-                # SAFELY get the mate number (Handle different library versions)
+                # Handle version differences safely
                 mate_turns = None
+                if hasattr(score, "mate"): mate_turns = score.mate()
+                elif hasattr(score, "relative") and hasattr(score.relative, "mate"): mate_turns = score.relative.mate()
                 
-                # Method A: Direct access (Newer versions)
-                if hasattr(score, "mate"):
-                    mate_turns = score.mate()
-                # Method B: Relative access (Older versions)
-                elif hasattr(score, "relative") and hasattr(score.relative, "mate"):
-                    mate_turns = score.relative.mate()
-                
-                # Logic: If mate_turns is positive (>0), it means WE are winning.
-                # If it's negative, we are losing (don't force a move that gets us mated, though stockfish avoids that anyway)
+                # If mate is positive, WE win. Play it.
                 if mate_turns is not None and mate_turns > 0:
-                    return info["pv"][0]  # PLAY THE WINNING MOVE!
-    # -------------------------------------
+                    return info["pv"][0]
 
-    # If no immediate mate, proceed with Hybrid Selection
+    # 3. Hybrid Selection (Neural Net + Stockfish)
     top_moves = [info["pv"][0] for info in result if "pv" in info]
-    
     if not top_moves: return None
     if len(top_moves) == 1: return top_moves[0] 
 
-    # Prepare Data for Neural Network
+    # Prepare Data
     pieces = {'p': 1, 'n': 2, 'b': 3, 'r': 4, 'q': 5, 'k': 6,
               'P': 7, 'N': 8, 'B': 9, 'R': 10, 'Q': 11, 'K': 12}
     foo = []
@@ -131,32 +115,30 @@ def get_continuation(board, depth=3):
     return " -> ".join(sequence)
 
 def explain_move(board, move):
+    """Generates text explanation for a move."""
     explanation = []
-    phase = "Opening" if board.fullmove_number < 10 else "Middlegame"
     
-    # Check for Checkmate first
+    # 1. Check Special Cases
     temp_board = board.copy()
     temp_board.push(move)
     if temp_board.is_checkmate():
-        return "🏆 **Checkmate:** This move wins the game immediately!"
-
-    if phase == "Opening":
-        if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
-            explanation.append("🎯 **Center Control:** Taking the high ground.")
-        elif board.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
-             if move.from_square in [chess.B1, chess.G1, chess.B8, chess.G8]:
-                explanation.append("🦄 **Development:** Getting pieces into the game.")
-        if board.is_castling(move):
-            explanation.append("🏰 **Safety:** King is tucked away safely.")
-
-    if board.is_capture(move):
-        explanation.append("⚔️ **Capture:** A safe material gain or trade.")
+        return "🏆 **Checkmate:** Wins the game immediately!"
     
+    # 2. Heuristics
+    if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
+        explanation.append("🎯 **Center Control:** Occupying the center.")
+    elif board.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
+            if move.from_square in [chess.B1, chess.G1, chess.B8, chess.G8]:
+            explanation.append("🦄 **Development:** Activating a minor piece.")
+    if board.is_castling(move):
+        explanation.append("🏰 **King Safety:** Castling to safety.")
+    if board.is_capture(move):
+        explanation.append("⚔️ **Capture:** Taking material.")
     if board.gives_check(move):
-        explanation.append("⚠️ **Check:** Forcing the King to move.")
+        explanation.append("⚠️ **Check:** Attacking the King.")
 
     if not explanation:
-        explanation.append(f"💡 **Positional:** Improving piece activity and structure.")
+        explanation.append(f"💡 **Solid Move:** Improving position.")
         
     return " ".join(explanation)
 
@@ -164,6 +146,15 @@ def explain_move(board, move):
 def get_current_board():
     board = chess.Board()
     for i in range(st.session_state.move_index + 1):
+        if i < len(st.session_state.game_moves):
+            board.push(st.session_state.game_moves[i])
+    return board
+
+def get_previous_board():
+    """Gets board state BEFORE the last move was played"""
+    board = chess.Board()
+    # Go up to index - 1
+    for i in range(st.session_state.move_index):
         if i < len(st.session_state.game_moves):
             board.push(st.session_state.game_moves[i])
     return board
@@ -182,7 +173,6 @@ def load_pgn(pgn_string):
 # --- SIDEBAR UI ---
 with st.sidebar:
     st.header("🎮 Game Controls")
-    
     c1, c2 = st.columns(2)
     with c1:
         if st.button("⏪ Start"):
@@ -200,29 +190,26 @@ with st.sidebar:
         if st.button("End ⏩"):
             st.session_state.move_index = len(st.session_state.game_moves) - 1
             st.rerun()
-            
-    st.markdown("---")
-    st.subheader("📋 Load Game")
-    pgn_input = st.text_area("Paste PGN here:", height=100)
+    
+    st.divider()
+    pgn_input = st.text_area("Paste PGN:", height=100)
     if st.button("📥 Load PGN"):
         load_pgn(pgn_input)
         st.rerun()
-        
     if st.button("🗑️ Reset Board"):
         st.session_state.game_moves = []
         st.session_state.move_index = -1
         st.session_state.custom_pgn_loaded = False
         st.rerun()
 
-# --- MAIN PAGE UI ---
-st.title("♟️ Hybrid AI Chess Coach")
+# --- MAIN UI ---
+st.title("♟️ Hybrid AI Coach")
 
 board = get_current_board()
 suggested_move = None
 continuation_str = ""
 
 if not board.is_game_over():
-    # RUN THE FIXED AI LOGIC
     suggested_move = predict_move_hybrid(board)
     if suggested_move:
         continuation_str = get_continuation(board, depth=3)
@@ -238,23 +225,31 @@ with col1:
     if st.session_state.move_index >= 0 and st.session_state.game_moves:
         last_move = st.session_state.game_moves[st.session_state.move_index]
 
-    board_svg = chess.svg.board(
-        board=board, 
-        arrows=arrows,
-        lastmove=last_move,
-        size=500
-    )
+    board_svg = chess.svg.board(board=board, arrows=arrows, lastmove=last_move, size=500)
     st.image(f"data:image/svg+xml;base64,{base64.b64encode(board_svg.encode('utf-8')).decode('utf-8')}")
 
 with col2:
-    st.subheader(f"Move: {st.session_state.move_index + 1}")
+    # --- NEW FEATURE: FEEDBACK ON LAST MOVE ---
+    if st.session_state.move_index >= 0:
+        last_played_move = st.session_state.game_moves[st.session_state.move_index]
+        prev_board = get_previous_board() # State before the move
+        
+        # Explain what just happened
+        feedback = explain_move(prev_board, last_played_move)
+        
+        st.info(f"**📜 Last Move:** {prev_board.san(last_played_move)}")
+        st.markdown(f"> *{feedback}*")
+        st.divider()
+    # ------------------------------------------
+
+    st.subheader("🤖 AI Suggestion (Next Move)")
     
     if suggested_move:
-        st.success(f"**AI Suggests:** {suggested_move.uci()}")
-        st.info(f"**🔮 Continuation:** {continuation_str}")
+        st.success(f"**Best Move:** {suggested_move.uci()}")
+        st.caption(f"🔮 Line: {continuation_str}")
         
         reason = explain_move(board, suggested_move)
-        st.markdown(f"**Why?** {reason}")
+        st.write(f"**Why?** {reason}")
         
         if st.button(f"▶️ Play {board.san(suggested_move)}"):
             st.session_state.game_moves = st.session_state.game_moves[:st.session_state.move_index+1]
@@ -268,8 +263,7 @@ with col2:
         st.warning("Thinking...")
 
     st.write("---")
-    st.write("**Manual Play (Click to move):**")
-    
+    st.write("**Manual Play:**")
     legal_moves = [m for m in board.legal_moves]
     cols = st.columns(4)
     for i, move in enumerate(legal_moves):
@@ -279,7 +273,7 @@ with col2:
             st.session_state.move_index += 1
             st.rerun()
 
-st.write("---")
+st.divider()
 st.subheader("📜 History")
 hist_board = chess.Board()
 history_text = []
