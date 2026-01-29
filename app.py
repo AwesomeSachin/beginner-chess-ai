@@ -53,20 +53,17 @@ def predict_move_hybrid(board):
     engine.quit()
     
     # 2. KILLER INSTINCT: Check for Mate or Winning Advantage
-    # If the best move is a Mate, PLAY IT.
     best_info = result[0]
     if "score" in best_info:
         score = best_info["score"]
         if score.is_mate():
-             # Check if we are the ones mating (positive score)
             mate_turns = None
             if hasattr(score, "mate"): mate_turns = score.mate()
             elif hasattr(score, "relative") and hasattr(score.relative, "mate"): mate_turns = score.relative.mate()
             if mate_turns is not None and mate_turns > 0:
                 return best_info["pv"][0] # Force Mate
 
-        # If we are winning by a huge margin (> +6.0), don't get fancy. Just win.
-        # This catches things like Qh5+ which might not be mate but wins a Rook.
+        # If winning by huge margin (> +6.0), just play best move
         val = score.relative.score(mate_score=10000)
         if val is not None and val > 600:
              return best_info["pv"][0]
@@ -96,32 +93,24 @@ def predict_move_hybrid(board):
     best_hybrid_move = None
     best_hybrid_score = -1
 
-    # Find the move the Neural Network likes best among the safe ones
     for move in top_moves:
         score = pred_from[move.from_square] * pred_to[move.to_square]
         if score > best_hybrid_score:
             best_hybrid_score = score
             best_hybrid_move = move
 
-    # 4. BLUNDER GUARD (Crucial Fix for Qh5+ vs Nf3)
-    # Compare the Eval of the Best Engine Move vs. The Hybrid Move
-    # If Hybrid move is > 150 centipawns (1.5 pawns) worse, reject it.
-    
+    # 4. BLUNDER GUARD
     if best_hybrid_move and best_hybrid_move != top_moves[0]:
-        # Find score of best move
         best_eval = result[0]["score"].relative.score(mate_score=10000)
-        
-        # Find score of hybrid move
         hybrid_eval = -10000
         for info in result:
             if "pv" in info and info["pv"][0] == best_hybrid_move:
                 hybrid_eval = info["score"].relative.score(mate_score=10000)
                 break
         
-        # If the gap is too big (e.g. Qh5+ is +500, Nf3 is +20), FORCE BEST MOVE
         if best_eval is not None and hybrid_eval is not None:
             if (best_eval - hybrid_eval) > 150:
-                return top_moves[0] # Override NN, play optimal move
+                return top_moves[0] # Override if too risky
 
     return best_hybrid_move if best_hybrid_move else top_moves[0]
 
@@ -155,21 +144,21 @@ def explain_move_heuristics(board, move):
     # Check checks/captures first
     temp = board.copy()
     temp.push(move)
-    if temp.is_checkmate(): return "🏆 **Checkmate**"
-    if temp.is_check(): explanation.append("⚠️ **Check**")
+    if temp.is_checkmate(): return "🏆 **Checkmate:** This move wins the game!"
+    if temp.is_check(): explanation.append("⚠️ **Check:** Force the King to move.")
     
-    if board.is_capture(move): explanation.append("⚔️ **Capture**")
-    if board.is_castling(move): explanation.append("🏰 **Castle**")
+    if board.is_capture(move): explanation.append("⚔️ **Capture:** Winning material or trading.")
+    if board.is_castling(move): explanation.append("🏰 **Castle:** King safety improved.")
     
     # Positional
     if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
-        explanation.append("🎯 **Center**")
+        explanation.append("🎯 **Center Control:** Occupying the high ground.")
     elif board.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
          if move.from_square in [chess.B1, chess.G1, chess.B8, chess.G8]:
-            explanation.append("🦄 **Development**")
+            explanation.append("🦄 **Development:** Getting pieces into the battle.")
 
-    if not explanation: return "💡 **Positional**"
-    return " + ".join(explanation)
+    if not explanation: return "💡 **Positional:** Improving piece activity."
+    return " ".join(explanation)
 
 def get_continuation(board, depth=3):
     temp = board.copy()
@@ -278,12 +267,20 @@ with col2:
         st.caption(f"Reason: {reason}")
         st.divider()
 
-    st.subheader("🤖 AI Advice")
+    # --- AI SUGGESTION (RESTORED FORMAT) ---
+    st.subheader("🤖 AI Suggestion")
     if suggested_move:
+        # 1. The Green Box for Best Move
         st.success(f"**Best Move:** {suggested_move.uci()}")
-        st.caption(f"Line: {continuation_str}")
-        st.write(f"**Type:** {explain_move_heuristics(board, suggested_move)}")
         
+        # 2. The Blue Box for Continuation
+        st.info(f"🔮 **Continuation:** {continuation_str}")
+        
+        # 3. The Text Explanation
+        reason = explain_move_heuristics(board, suggested_move)
+        st.write(f"**Why?** {reason}")
+        
+        # 4. Play Button
         if st.button(f"Play {board.san(suggested_move)}"):
             st.session_state.game_moves = st.session_state.game_moves[:st.session_state.move_index+1]
             st.session_state.game_moves.append(suggested_move)
@@ -300,7 +297,7 @@ with col2:
             st.session_state.move_index += 1
             st.rerun()
 
-# --- RESTORED HISTORY SECTION ---
+# --- HISTORY SECTION ---
 st.divider()
 st.subheader("📜 Game History")
 hist_board = chess.Board()
