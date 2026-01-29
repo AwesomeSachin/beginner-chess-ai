@@ -10,7 +10,7 @@ import base64
 import os
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Beginner AI Chess Coach", layout="wide")
+st.set_page_config(page_title="Pro Chess Analyst", layout="wide")
 
 # --- PATH TO STOCKFISH ---
 STOCKFISH_PATH = "/usr/games/stockfish"
@@ -42,86 +42,40 @@ def get_stockfish_engine():
     except:
         return None
 
-# --- HELPER 2: ANALYZE MOVE QUALITY (BLUNDER/BEST/ETC) ---
-def analyze_move_quality(board_before, move_played):
-    """
-    Compares the played move against the engine's best move to determine quality.
-    Returns: (Label, Color, Explanation)
-    """
-    engine = get_stockfish_engine()
-    if not engine: return ("Unknown", "grey", "Engine not available")
-
-    # 1. Analyze the position BEFORE the move (to find the BEST possible score)
-    # We look deeper (time=0.3) for accuracy
-    limit = chess.engine.Limit(time=0.3)
-    
-    # Get best move evaluation
-    info_best = engine.analyse(board_before, limit)
-    best_score_val = info_best["score"].relative.score(mate_score=10000)
-    
-    # 2. Analyze the ACTUAL move played
-    # We restrict search to just the move played
-    info_played = engine.analyse(board_before, limit, root_moves=[move_played])
-    played_score_val = info_played["score"].relative.score(mate_score=10000)
-    
-    engine.quit()
-
-    # Calculate Difference (How much value did we lose?)
-    # If best was 500 and we played 500, diff is 0.
-    # If best was 500 and we played 0 (blunder), diff is 500.
-    diff = best_score_val - played_score_val
-
-    # 3. Categorize
-    label = "Good"
-    color = "blue"
-    reason = "Solid play."
-
-    # Logic for categories
-    if diff <= 10: 
-        label = "🏆 Best Move"
-        color = "green"
-        reason = "Perfect! You found the engine's top choice."
-    elif diff <= 50:
-        label = "✅ Excellent"
-        color = "lightgreen"
-        reason = "Very strong move, almost perfect."
-    elif diff <= 150:
-        label = "⚠️ Inaccuracy"
-        color = "orange"
-        reason = "Slightly passive or imprecise."
-    elif diff <= 300:
-        label = "❌ Mistake"
-        color = "darkorange"
-        reason = f"You lost advantage (Eval drop: {diff/100:.1f})."
-    else:
-        label = "💀 Blunder"
-        color = "red"
-        reason = f"Disastrous! You lost significant material or the game (Eval drop: {diff/100:.1f})."
-        
-    # Check for Brilliant (Hard to code perfectly, but generally if you sacrifice material for a gain)
-    # Simple check: If you captured a piece of higher value but eval stayed high? 
-    # For beginner AI, we stick to Eval Diff.
-    
-    return label, color, reason
-
-# --- HELPER 3: HYBRID PREDICTION ---
+# --- HELPER 2: HYBRID PREDICTION (WITH BLUNDER GUARD) ---
 def predict_move_hybrid(board):
     engine = get_stockfish_engine()
     if not engine: return None
 
+    # 1. Ask Stockfish for Top 5 Moves
     limit = chess.engine.Limit(time=0.1)
     result = engine.analyse(board, limit, multipv=5)
     engine.quit()
     
-    # Check for Forced Mate
-    for info in result:
-        if "score" in info and info["score"].is_mate():
-            if info["score"].relative.mate() > 0: return info["pv"][0]
+    # 2. KILLER INSTINCT: Check for Mate or Winning Advantage
+    # If the best move is a Mate, PLAY IT.
+    best_info = result[0]
+    if "score" in best_info:
+        score = best_info["score"]
+        if score.is_mate():
+             # Check if we are the ones mating (positive score)
+            mate_turns = None
+            if hasattr(score, "mate"): mate_turns = score.mate()
+            elif hasattr(score, "relative") and hasattr(score.relative, "mate"): mate_turns = score.relative.mate()
+            if mate_turns is not None and mate_turns > 0:
+                return best_info["pv"][0] # Force Mate
 
+        # If we are winning by a huge margin (> +6.0), don't get fancy. Just win.
+        # This catches things like Qh5+ which might not be mate but wins a Rook.
+        val = score.relative.score(mate_score=10000)
+        if val is not None and val > 600:
+             return best_info["pv"][0]
+
+    # 3. HYBRID SELECTION
     top_moves = [info["pv"][0] for info in result if "pv" in info]
     if not top_moves: return None
-    if len(top_moves) == 1: return top_moves[0] 
-
+    
+    # Get NN Predictions
     pieces = {'p': 1, 'n': 2, 'b': 3, 'r': 4, 'q': 5, 'k': 6,
               'P': 7, 'N': 8, 'B': 9, 'R': 10, 'Q': 11, 'K': 12}
     foo = []
@@ -142,35 +96,91 @@ def predict_move_hybrid(board):
     best_hybrid_move = None
     best_hybrid_score = -1
 
+    # Find the move the Neural Network likes best among the safe ones
     for move in top_moves:
         score = pred_from[move.from_square] * pred_to[move.to_square]
         if score > best_hybrid_score:
             best_hybrid_score = score
             best_hybrid_move = move
-            
+
+    # 4. BLUNDER GUARD (Crucial Fix for Qh5+ vs Nf3)
+    # Compare the Eval of the Best Engine Move vs. The Hybrid Move
+    # If Hybrid move is > 150 centipawns (1.5 pawns) worse, reject it.
+    
+    if best_hybrid_move and best_hybrid_move != top_moves[0]:
+        # Find score of best move
+        best_eval = result[0]["score"].relative.score(mate_score=10000)
+        
+        # Find score of hybrid move
+        hybrid_eval = -10000
+        for info in result:
+            if "pv" in info and info["pv"][0] == best_hybrid_move:
+                hybrid_eval = info["score"].relative.score(mate_score=10000)
+                break
+        
+        # If the gap is too big (e.g. Qh5+ is +500, Nf3 is +20), FORCE BEST MOVE
+        if best_eval is not None and hybrid_eval is not None:
+            if (best_eval - hybrid_eval) > 150:
+                return top_moves[0] # Override NN, play optimal move
+
     return best_hybrid_move if best_hybrid_move else top_moves[0]
+
+# --- HELPER 3: QUALITY ANALYSIS ---
+def analyze_move_quality(board_before, move_played):
+    engine = get_stockfish_engine()
+    if not engine: return ("Unknown", "grey", "Engine unavailable")
+
+    limit = chess.engine.Limit(time=0.3)
+    info_best = engine.analyse(board_before, limit)
+    best_score = info_best["score"].relative.score(mate_score=10000)
+    
+    info_played = engine.analyse(board_before, limit, root_moves=[move_played])
+    played_score = info_played["score"].relative.score(mate_score=10000)
+    engine.quit()
+
+    if best_score is None or played_score is None: return ("Unknown", "grey", "Score error")
+
+    diff = best_score - played_score
+
+    if diff <= 15: return ("🏆 Best Move", "green", "Perfect play.")
+    if diff <= 50: return ("✅ Excellent", "lightgreen", "Strong move.")
+    if diff <= 150: return ("⚠️ Inaccuracy", "orange", "Slightly passive.")
+    if diff <= 300: return ("❌ Mistake", "darkorange", f"Eval drop: {diff/100:.1f}")
+    return ("💀 Blunder", "red", f"Disastrous drop: {diff/100:.1f}")
 
 # --- HELPER 4: EXPLANATION ---
 def explain_move_heuristics(board, move):
     explanation = []
-    if board.is_capture(move): explanation.append("⚔️ Capture")
-    if board.gives_check(move): explanation.append("⚠️ Check")
-    if board.is_castling(move): explanation.append("🏰 Castle")
     
-    if not explanation: return "Positional Move"
-    return ", ".join(explanation)
+    # Check checks/captures first
+    temp = board.copy()
+    temp.push(move)
+    if temp.is_checkmate(): return "🏆 **Checkmate**"
+    if temp.is_check(): explanation.append("⚠️ **Check**")
+    
+    if board.is_capture(move): explanation.append("⚔️ **Capture**")
+    if board.is_castling(move): explanation.append("🏰 **Castle**")
+    
+    # Positional
+    if move.to_square in [chess.E4, chess.D4, chess.E5, chess.D5]:
+        explanation.append("🎯 **Center**")
+    elif board.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
+         if move.from_square in [chess.B1, chess.G1, chess.B8, chess.G8]:
+            explanation.append("🦄 **Development**")
+
+    if not explanation: return "💡 **Positional**"
+    return " + ".join(explanation)
 
 def get_continuation(board, depth=3):
-    temp_board = board.copy()
+    temp = board.copy()
     sequence = []
     for _ in range(depth):
-        if temp_board.is_game_over(): break
-        move = predict_move_hybrid(temp_board)
+        if temp.is_game_over(): break
+        move = predict_move_hybrid(temp)
         if move:
-            sequence.append(temp_board.san(move))
-            temp_board.push(move)
-        else:
-            break
+            sequence.append(temp.san(move))
+            temp.push(move)
+        else: break
     return " -> ".join(sequence)
 
 # --- HELPER 5: NAVIGATION ---
@@ -253,26 +263,20 @@ with col1:
     st.image(f"data:image/svg+xml;base64,{base64.b64encode(board_svg.encode('utf-8')).decode('utf-8')}")
 
 with col2:
-    # --- 🔍 MOVE QUALITY ANALYSIS ---
+    # --- ANALYSIS BADGE ---
     if st.session_state.move_index >= 0:
         last_played_move = st.session_state.game_moves[st.session_state.move_index]
         prev_board = get_previous_board()
-        
-        # Determine Quality
         label, color, reason = analyze_move_quality(prev_board, last_played_move)
         
         st.markdown(f"### Last Move: **{prev_board.san(last_played_move)}**")
-        
-        # Display Badge
         st.markdown(f"""
-        <div style="background-color: {color}; padding: 10px; border-radius: 5px; color: white; text-align: center; font-weight: bold; font-size: 20px;">
+        <div style="background-color: {color}; padding: 10px; border-radius: 5px; color: white; text-align: center; font-weight: bold;">
             {label}
         </div>
         """, unsafe_allow_html=True)
-        
-        st.write(f"**Analysis:** {reason}")
+        st.caption(f"Reason: {reason}")
         st.divider()
-    # -------------------------------
 
     st.subheader("🤖 AI Advice")
     if suggested_move:
@@ -295,3 +299,18 @@ with col2:
             st.session_state.game_moves.append(move)
             st.session_state.move_index += 1
             st.rerun()
+
+# --- RESTORED HISTORY SECTION ---
+st.divider()
+st.subheader("📜 Game History")
+hist_board = chess.Board()
+history_text = []
+for i, m in enumerate(st.session_state.game_moves):
+    move_san = hist_board.san(m)
+    hist_board.push(m)
+    if i % 2 == 0:
+        history_text.append(f"**{(i//2)+1}.** {move_san}")
+    else:
+        history_text[-1] += f" {move_san}"
+
+st.markdown(" ".join(history_text))
