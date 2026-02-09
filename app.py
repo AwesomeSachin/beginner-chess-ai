@@ -135,7 +135,7 @@ def analyze_move_quality(board_before, move_played):
     if diff <= 50: return ("✅ Excellent", "lightgreen", "Strong move.")
     if diff <= 150: return ("⚠️ Inaccuracy", "orange", "Slightly passive.")
     if diff <= 300: return ("❌ Mistake", "darkorange", f"Eval drop: {diff/100:.1f}")
-    return ("💀 Blunder", "red", f"Disastrous drop: {diff/100:.1f}")
+    return ("💀 Blunder...", "red", f"Disastrous drop: {diff/100:.1f}")
 
 # --- HELPER 4: EXPLANATION ---
 def explain_move_heuristics(board, move):
