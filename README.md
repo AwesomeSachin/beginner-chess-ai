@@ -46,7 +46,7 @@ This project goes beyond simple model training by solving specific engineering c
 * **[TensorFlow/Keras](https://www.tensorflow.org/):** For building and training the Dual-Head CNN.
 * **[Python-Chess](https://python-chess.readthedocs.io/):** For move generation, validation, and PGN parsing.
 * **[Stockfish 16](https://stockfishchess.org/):** The "Teacher" engine for safety verification.
-* **[Google Colab](https://colab.research.google.com/drive/1ECfvacFIn7o7KLRfMGHy9aXt6sGJuqyS?usp=sharing/):** Used for GPU-accelerated training of the model.
+* **[Google Colab](https://colab.research.google.com/drive/1ToyCsD7l5QPvGacsNWeVFZfdgbkL-q3q?usp=sharing):** Used for GPU-accelerated training of the model.
 * **[Streamlit](https://beginnerchessai.streamlit.app/):** For the interactive frontend UI and visualization.
 * **[Lichess Database](https://database.lichess.org/):** Source of millions of grandmaster games for training.
 * **[NumPy](https://numpy.org/):** For high-performance matrix manipulation of board states.
